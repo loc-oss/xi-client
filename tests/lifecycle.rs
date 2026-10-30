@@ -569,3 +569,142 @@ fn resize_then_scroll_does_not_stall() {
 
     shutdown_and_wait(&client);
 }
+
+
+// ───────────────────────── Phase 4: find / replace ─────────────────────────
+
+#[test]
+fn find_emits_find_status() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    // Give the view a size and a scroll window before searching — xi-core
+    // runs incremental find starting from the visible range.
+    client.resize(view_id, 800, 600).expect("resize");
+    client.scroll(view_id, 0, 24).expect("scroll");
+
+    client.insert(view_id, "foo bar foo baz foo").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("foo bar")
+    }));
+
+    use xi_client::FindQuery;
+    client.find(view_id, &FindQuery::new("foo")).expect("find");
+
+    // Wait for a FindStatus that actually reports matches. The first status
+    // after `find` may still have matches == 0 while incremental search runs.
+    let ev = wait_for(&client, Duration::from_secs(2), |e| {
+        matches!(
+            e,
+            Event::FindStatus { view_id: v, matches } if *v == view_id && *matches > 0
+        )
+    });
+    assert!(
+        ev.is_some(),
+        "FindStatus with matches > 0 not emitted; find did not start (did you resize/scroll?)"
+    );
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn find_all_then_replace_all() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    client.resize(view_id, 800, 600).expect("resize");
+    client.scroll(view_id, 0, 24).expect("scroll");
+
+    client.insert(view_id, "foo foo foo").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text == "foo foo foo"
+    }));
+
+    use xi_client::FindQuery;
+
+    // 1. Set the query and wait until incremental find has found all three.
+    client.find(view_id, &FindQuery::new("foo")).expect("find");
+    let found = wait_for(&client, Duration::from_secs(2), |e| {
+        matches!(
+            e,
+            Event::FindStatus { view_id: v, matches } if *v == view_id && *matches >= 3
+        )
+    })
+    .is_some();
+    assert!(found, "find did not report all three matches");
+
+    // 2. Set the replacement string.
+    client.replace(view_id, "bar").expect("replace");
+
+    // 3. Select all matches (this sets up the selections for replacement).
+    client.find_all(view_id).expect("find_all");
+
+    // 4. Replace all matches.
+    client.replace_all(view_id).expect("replace_all");
+
+    // 5. Wait for the buffer to change.
+    let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text == "bar bar bar"
+    });
+    assert_doc_state(&client, view_id, ok, "replace_all did not replace text");
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn selection_for_replace_smoke() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    client.insert(view_id, "old").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text == "old"
+    }));
+    client.select_all(view_id).expect("select_all");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        !doc.selections.is_empty()
+    }));
+
+    client.selection_for_replace(view_id).expect("selection_for_replace");
+    // No assertion on state: xi-core emits a replace_status notification
+    // that we surface as Event::ReplaceStatus. We just confirm the RPC
+    // doesn't stall the pipeline.
+    client.insert(view_id, "new").expect("insert after");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("new")
+    }));
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn find_next_wraps_or_moves_smoke() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    client.insert(view_id, "a match here, a match there").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("match")
+    }));
+
+    use xi_client::{FindOptions, FindQuery};
+    client.find(view_id, &FindQuery::new("match")).expect("find");
+    std::thread::sleep(Duration::from_millis(50));
+
+    client
+        .find_next(view_id, &FindOptions::default().wrap_around(true))
+        .expect("find_next");
+
+    // No hard assertion on selection (depends on xi-core behavior); smoke
+    // test that the pipeline still works after find_next.
+    client.insert(view_id, "X").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("X")
+    }));
+
+    shutdown_and_wait(&client);
+}

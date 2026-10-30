@@ -18,7 +18,7 @@ use xi_rpc::{Peer, RpcLoop, RpcPeer};
 use crate::document::DocumentState;
 use crate::events::Event;
 use crate::process::{SharedStdin, XiProcess};
-use crate::types::{Config, ConfigDomain, GestureType, SpawnOptions, Style, Update, ViewId};
+use crate::types::{Config, ConfigDomain, FindOptions, FindQuery, GestureType, SpawnOptions, Style, Update, ViewId};
 use crate::{Error, Result};
 
 mod handler;
@@ -474,6 +474,69 @@ impl XiClient {
     pub fn gesture(&self, view_id: ViewId, line: u64, col: u64, ty: GestureType) -> Result<()> {
         let ty_json = serde_json::to_value(&ty)?;
         self.send_edit(view_id, "gesture", json!({ "line": line, "col": col, "ty": ty_json }))
+    }
+
+        // ───────────────────────── Find & replace ─────────────────────────
+
+    /// Sends a find query. Results arrive asynchronously as
+    /// [`Event::FindStatus`] (match count) and `update` annotations.
+    pub fn find(&self, view_id: ViewId, query: &FindQuery) -> Result<()> {
+        self.send_edit(view_id, "find", serde_json::to_value(query)?)
+    }
+
+    /// Sends multiple find queries at once. Each has an `id`; results
+    /// reference the same id.
+    pub fn multi_find(&self, view_id: ViewId, queries: &[FindQuery]) -> Result<()> {
+        self.send_edit(view_id, "multi_find", json!({ "queries": queries }))
+    }
+
+    /// Moves to the next match of the current query.
+    pub fn find_next(&self, view_id: ViewId, options: &FindOptions) -> Result<()> {
+        self.send_edit(view_id, "find_next", serde_json::to_value(options)?)
+    }
+
+    /// Moves to the previous match of the current query.
+    pub fn find_previous(&self, view_id: ViewId, options: &FindOptions) -> Result<()> {
+        self.send_edit(view_id, "find_previous", serde_json::to_value(options)?)
+    }
+
+    /// Selects all matches of the current query as multi-cursor selections.
+    pub fn find_all(&self, view_id: ViewId) -> Result<()> {
+        self.send_edit(view_id, "find_all", json!([]))
+    }
+
+    /// Turns find highlighting on or off.
+    pub fn highlight_find(&self, view_id: ViewId, visible: bool) -> Result<()> {
+        self.send_edit(view_id, "highlight_find", json!({ "visible": visible }))
+    }
+
+    /// Sets the current query to the selected text.
+    pub fn selection_for_find(&self, view_id: ViewId, case_sensitive: bool) -> Result<()> {
+        self.send_edit(
+            view_id,
+            "selection_for_find",
+            json!({ "case_sensitive": case_sensitive }),
+        )
+    }
+
+    /// Sets the replacement string and applies it to the current selection.
+    pub fn replace(&self, view_id: ViewId, chars: &str) -> Result<()> {
+        self.send_edit(view_id, "replace", json!({ "chars": chars }))
+    }
+
+    /// Replaces the current match and moves to the next.
+    pub fn replace_next(&self, view_id: ViewId) -> Result<()> {
+        self.send_edit(view_id, "replace_next", json!([]))
+    }
+
+    /// Replaces all matches of the current query.
+    pub fn replace_all(&self, view_id: ViewId) -> Result<()> {
+        self.send_edit(view_id, "replace_all", json!([]))
+    }
+
+    /// Sets the current replacement string from the selected text.
+    pub fn selection_for_replace(&self, view_id: ViewId) -> Result<()> {
+        self.send_edit(view_id, "selection_for_replace", json!([]))
     }
 
     // ───────────────────────── Clipboard ─────────────────────────

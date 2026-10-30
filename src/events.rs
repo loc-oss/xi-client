@@ -57,6 +57,17 @@ pub enum Event {
     /// the search reaches EOF.
     FindStatus { view_id: ViewId, matches: u64 },
 
+    /// A `replace_status` notification.
+    ///
+    /// Emitted when the current replacement string or its options change.
+    /// `chars` is the replacement text; `preserve_case` mirrors the
+    /// `preserve_case` config flag.
+    ReplaceStatus {
+        view_id: ViewId,
+        chars: String,
+        preserve_case: bool,
+    },
+
     /// A `scroll_to` notification. Requests that the viewport be scrolled so
     /// that `(line, col)` is visible.
     ///

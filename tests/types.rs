@@ -323,3 +323,81 @@ fn config_domain_serializes() {
         json!({"user_override": "view-id-1"})
     );
 }
+
+// ───────────────────────── FindQuery / FindOptions ─────────────────────────
+
+#[test]
+fn find_query_minimal_wire_shape() {
+    use xi_client::FindQuery;
+    let q = FindQuery::new("hello");
+    assert_eq!(
+        serde_json::to_value(&q).unwrap(),
+        json!({"chars": "hello", "case_sensitive": false})
+    );
+}
+
+#[test]
+fn find_query_full_wire_shape() {
+    use xi_client::FindQuery;
+    let q = FindQuery::new("h.llo").regex(true).case_sensitive(true).whole_words(true);
+    assert_eq!(
+        serde_json::to_value(&q).unwrap(),
+        json!({
+            "chars": "h.llo",
+            "case_sensitive": true,
+            "regex": true,
+            "whole_words": true
+        })
+    );
+}
+
+#[test]
+fn find_query_builder_chains() {
+    use xi_client::FindQuery;
+    let q = FindQuery::new("x")
+        .case_sensitive(true)
+        .regex(true)
+        .whole_words(true)
+        .with_id(42);
+    assert_eq!(q.id, Some(42));
+    assert_eq!(q.chars, "x");
+    assert!(q.case_sensitive);
+    assert!(q.regex);
+    assert!(q.whole_words);
+}
+
+#[test]
+fn find_options_default_serializes_to_empty_object() {
+    use xi_client::FindOptions;
+    assert_eq!(serde_json::to_value(FindOptions::default()).unwrap(), json!({}));
+}
+
+#[test]
+fn find_options_full_wire_shape() {
+    use xi_client::{FindOptions, ModifySelection};
+    let o = FindOptions::default()
+        .wrap_around(true)
+        .allow_same(true)
+        .modify_selection(ModifySelection::Add);
+    assert_eq!(
+        serde_json::to_value(&o).unwrap(),
+        json!({
+            "wrap_around": true,
+            "allow_same": true,
+            "modify_selection": "add"
+        })
+    );
+}
+
+#[test]
+fn modify_selection_wire_names() {
+    use xi_client::ModifySelection;
+    for (variant, wire) in [
+        (ModifySelection::None, "none"),
+        (ModifySelection::Set, "set"),
+        (ModifySelection::Add, "add"),
+        (ModifySelection::AddRemovingCurrent, "add_removing_current"),
+    ] {
+        assert_eq!(serde_json::to_value(variant).unwrap(), json!(wire));
+    }
+}

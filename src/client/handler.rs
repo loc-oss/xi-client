@@ -54,6 +54,7 @@ impl Handler for ClientHandler {
             "theme_changed" => self.on_theme_changed(params),
             "scroll_to" => self.on_scroll_to(params),
             "find_status" => self.on_find_status(params),
+            "replace_status" => self.on_replace_status(params),
             "available_languages" => self.on_available_languages(params),
             "available_themes" => self.on_available_themes(params),
             _ => {
@@ -207,9 +208,41 @@ impl ClientHandler {
         let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
             return;
         };
-        // Wire format varies: some builds send `matches`, others `queries`.
-        let matches = params.get("matches").and_then(Value::as_u64).unwrap_or(0);
+
+        // Wire format:
+        // {"view_id": "view-id-1", "queries": [{"matches": 3, ...}, ...]}
+        let matches = if let Some(queries) = params.get("queries").and_then(Value::as_array) {
+            // Sum matches across all active queries.
+            queries
+                .iter()
+                .filter_map(|q| q.get("matches").and_then(Value::as_u64))
+                .sum()
+        } else {
+            // Fallback for older builds that sent `matches` at top level.
+            params.get("matches").and_then(Value::as_u64).unwrap_or(0)
+        };
+
         self.send_event(Event::FindStatus { view_id, matches });
+    }
+
+    fn on_replace_status(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let Some(status) = params.get("status") else {
+            return;
+        };
+        let chars = status
+            .get("chars")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let preserve_case = status
+            .get("preserve_case")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.send_event(Event::ReplaceStatus { view_id, chars, preserve_case });
     }
 
     fn on_available_languages(&mut self, params: Option<Value>) {

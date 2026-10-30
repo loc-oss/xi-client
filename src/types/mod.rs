@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod config_domain;
+pub mod find;
 pub mod gesture;
 pub mod line;
 pub mod operation;
@@ -16,6 +17,7 @@ pub mod view_id;
 
 pub use config::Config;
 pub use config_domain::ConfigDomain;
+pub use find::{FindOptions, FindQuery, ModifySelection};
 pub use gesture::{GestureType, Granularity};
 pub use line::{Line, StyleDef};
 pub use operation::{Operation, OperationType};
