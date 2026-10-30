@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use serde_json::json;
 
 use xi_client::{DocumentSnapshot, Event, ViewId, XiClient};
 
@@ -369,6 +370,131 @@ fn cut_empties_the_buffer() {
         doc.lines[0].text.is_empty()
     });
     assert_doc_state(&client, view_id, ok, "cut did not empty the buffer");
+
+    shutdown_and_wait(&client);
+}
+
+// ───────────────────────── Phase 3: options, config, lifecycle ─────────────────────────
+
+#[test]
+fn spawn_with_options_capture_stderr() {
+    let core = core_or_skip!();
+    use xi_client::SpawnOptions;
+    let opts = SpawnOptions {
+        capture_stderr: true,
+        ..Default::default()
+    };
+    let client = XiClient::spawn_with_options(&core, opts).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+    assert!(client.document(view_id).is_some());
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn view_ids_lists_opened_views() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    assert!(client.view_ids().is_empty());
+
+    let v1 = client.new_view(None).expect("new_view 1");
+    let v2 = client.new_view(None).expect("new_view 2");
+
+    let ids = client.view_ids();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&v1));
+    assert!(ids.contains(&v2));
+
+    client.close_view(v1).expect("close");
+    let ids = client.view_ids();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0], v2);
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn wait_for_exit_after_shutdown() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    client.shutdown();
+    let status = client
+        .wait_for_exit(Duration::from_secs(5))
+        .expect("wait_for_exit");
+    // Don't assert on status.success() — depends on xi-core's exit code.
+    let _ = status;
+}
+
+#[test]
+fn wait_for_exit_times_out_when_running() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let _view = client.new_view(None).expect("new_view");
+    // Don't shutdown; wait should time out.
+    let result = client.wait_for_exit(Duration::from_millis(100));
+    assert!(result.is_err(), "expected timeout, got {:?}", result);
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn wait_for_exit_is_idempotent() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    client.shutdown();
+    let s1 = client.wait_for_exit(Duration::from_secs(5)).expect("first");
+    let s2 = client.wait_for_exit(Duration::from_secs(1)).expect("second");
+    assert_eq!(s1, s2);
+}
+
+#[test]
+fn get_config_returns_config() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    // Lenient: we don't assert specific values (they vary by build), only
+    // that the request round-trips and deserializes into Config.
+    let _cfg = client.get_config(view_id).expect("get_config");
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn modify_user_config_does_not_panic() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    use xi_client::ConfigDomain;
+
+    // No config_dir → General modifications are accepted (or rejected with
+    // an Alert, depending on build). Either way, the call must not panic.
+    client
+        .modify_user_config(ConfigDomain::General, json!({"tab_size": 2}))
+        .expect("modify_user_config");
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn modify_user_config_user_override_updates_view() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    use xi_client::ConfigDomain;
+    client
+        .modify_user_config(
+            ConfigDomain::UserOverride(view_id),
+            json!({"tab_size": 2}),
+        )
+        .expect("modify_user_config");
+
+    let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.config.tab_size == Some(2)
+    });
+    assert!(
+        ok,
+        "UserOverride config not reflected; got {:?}",
+        client.document(view_id).map(|d| d.config.tab_size)
+    );
 
     shutdown_and_wait(&client);
 }

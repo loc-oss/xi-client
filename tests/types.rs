@@ -290,3 +290,36 @@ fn gesture_type_serializes_to_new_format() {
     let drag = GestureType::Drag;
     assert_eq!(serde_json::to_value(&drag).unwrap(), json!("drag"));
 }
+
+// ───────────────────────── SpawnOptions ─────────────────────────
+
+#[test]
+fn spawn_options_default_is_all_empty() {
+    use xi_client::SpawnOptions;
+    let opts = SpawnOptions::default();
+    assert!(opts.config_dir.is_none());
+    assert!(opts.client_extras_dir.is_none());
+    assert!(opts.log_level.is_none());
+    assert!(opts.log_dir.is_none());
+    assert!(opts.log_file.is_none());
+    assert!(!opts.capture_stderr);
+}
+
+// ───────────────────────── ConfigDomain ─────────────────────────
+
+#[test]
+fn config_domain_serializes() {
+    use xi_client::ConfigDomain;
+    assert_eq!(
+        serde_json::to_value(&ConfigDomain::General).unwrap(),
+        json!("general")
+    );
+    assert_eq!(
+        serde_json::to_value(&ConfigDomain::Syntax("rust".into())).unwrap(),
+        json!({"syntax": "rust"})
+    );
+    assert_eq!(
+        serde_json::to_value(&ConfigDomain::UserOverride(ViewId(1))).unwrap(),
+        json!({"user_override": "view-id-1"})
+    );
+}

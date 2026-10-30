@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde_json::{json, Value};
@@ -10,11 +11,9 @@ use xi_rpc::{Handler, Peer, RemoteError, RpcCtx, RpcLoop, RpcPeer};
 use crate::document::DocumentState;
 use crate::events::Event;
 use crate::process::{SharedStdin, XiProcess};
-use crate::types::{Config, GestureType, Style, Update, ViewId};
+use crate::types::{Config, ConfigDomain, GestureType, SpawnOptions, Style, Update, ViewId};
 use crate::{Error, Result};
 
-/// Mutable per-client state, shared between the reader thread and the
-/// application thread.
 struct Inner {
     docs: HashMap<ViewId, DocumentState>,
     styles: HashMap<u64, Style>,
@@ -255,18 +254,43 @@ fn measure_width(params: Option<&Value>) -> Vec<Vec<f64>> {
         .collect()
 }
 
+fn client_started_params(opts: &SpawnOptions) -> Value {
+    let mut map = serde_json::Map::new();
+    if let Some(cd) = &opts.config_dir {
+        map.insert("config_dir".into(), json!(cd.to_string_lossy()));
+    }
+    if let Some(ed) = &opts.client_extras_dir {
+        map.insert("client_extras_dir".into(), json!(ed.to_string_lossy()));
+    }
+    Value::Object(map)
+}
+
 pub struct XiClient {
     inner: Arc<Mutex<Inner>>,
     peer: RpcPeer,
     event_rx: Receiver<Event>,
     event_tx: Sender<Event>,
     stdin: SharedStdin,
+    /// Set to `true` by the reader thread just before it exits; waited on by
+    /// [`XiClient::wait_for_exit`].
+    reader_exit: Arc<(Mutex<bool>, Condvar)>,
+    /// Cached exit status, populated by [`XiClient::wait_for_exit`].
+    exit_status: Mutex<Option<std::process::ExitStatus>>,
     _process: XiProcess,
 }
 
 impl XiClient {
+    /// Spawns with default [`SpawnOptions`].
     pub fn spawn(core_path: impl AsRef<Path>) -> Result<Self> {
-        let process = XiProcess::spawn(core_path)?;
+        Self::spawn_with_options(core_path, SpawnOptions::default())
+    }
+
+    /// Spawns with explicit [`SpawnOptions`].
+    ///
+    /// `client_started` is sent immediately (before returning), with
+    /// `config_dir` / `client_extras_dir` if provided.
+    pub fn spawn_with_options(core_path: impl AsRef<Path>, opts: SpawnOptions) -> Result<Self> {
+        let process = XiProcess::spawn_with_options(core_path, &opts)?;
         let stdin_raw = process
             .take_stdin()
             .ok_or_else(|| Error::Spawn("no stdin".into()))?;
@@ -287,7 +311,10 @@ impl XiClient {
         let mut looper = RpcLoop::new(stdin.clone());
         let peer = looper.get_raw_peer().box_clone();
 
-        peer.send_rpc_notification("client_started", &json!({}));
+        peer.send_rpc_notification("client_started", &client_started_params(&opts));
+
+        let reader_exit = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader_exit_for_thread = Arc::clone(&reader_exit);
 
         let inner_for_reader = Arc::clone(&inner);
         let event_tx_for_reader = event_tx.clone();
@@ -303,6 +330,9 @@ impl XiClient {
                     &mut handler,
                 );
                 let _ = event_tx_for_reader.send(Event::Exited);
+                let (lock, cvar) = &*reader_exit_for_thread;
+                *lock.lock().unwrap() = true;
+                cvar.notify_all();
             })
             .map_err(Error::Io)?;
 
@@ -312,9 +342,56 @@ impl XiClient {
             event_rx,
             event_tx,
             stdin,
+            reader_exit,
+            exit_status: Mutex::new(None),
             _process: process,
         })
     }
+
+    // ───────────────────────── Lifecycle ─────────────────────────
+
+    /// Waits for the reader thread to observe EOF and then reaps the child.
+    ///
+    /// **Does not initiate shutdown.** Call [`shutdown`] first if you want
+    /// the process to exit; otherwise this waits up to `timeout` for the
+    /// process to exit on its own (e.g. crash) and returns an error.
+    ///
+    /// Idempotent: subsequent calls return the cached exit status.
+    pub fn wait_for_exit(
+        &self,
+        timeout: Duration,
+    ) -> Result<std::process::ExitStatus> {
+        if let Some(status) = *self.exit_status.lock().unwrap() {
+            return Ok(status);
+        }
+
+        {
+            let (lock, cvar) = &*self.reader_exit;
+            let mut done = lock.lock().unwrap();
+            let deadline = Instant::now() + timeout;
+            while !*done {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(Error::Rpc(format!(
+                        "timeout waiting for xi-core exit after {:?}",
+                        timeout
+                    )));
+                }
+                let (guard, _) = cvar.wait_timeout(done, remaining).unwrap();
+                done = guard;
+            }
+        }
+
+        let mut cache = self.exit_status.lock().unwrap();
+        if let Some(status) = *cache {
+            return Ok(status);
+        }
+        let status = self._process.wait()?;
+        *cache = Some(status);
+        Ok(status)
+    }
+
+    // ───────────────────────── Views ─────────────────────────
 
     pub fn new_view(&self, path: Option<PathBuf>) -> Result<ViewId> {
         let params = match path {
@@ -366,12 +443,53 @@ impl XiClient {
         Ok(())
     }
 
+    /// Returns the ids of all views currently known to the SDK, in
+    /// ascending order.
+    pub fn view_ids(&self) -> Vec<ViewId> {
+        let lock = self.inner.lock().unwrap();
+        let mut ids: Vec<ViewId> = lock.docs.keys().copied().collect();
+        ids.sort();
+        ids
+    }
+
     pub fn save(&self, view_id: ViewId, path: impl AsRef<Path>) -> Result<()> {
         let payload = json!({
             "view_id": view_id,
             "file_path": path.as_ref().to_string_lossy(),
         });
         self.peer.send_rpc_notification("save", &payload);
+        Ok(())
+    }
+
+    // ───────────────────────── Config ─────────────────────────
+
+    /// Fetches the merged config for `view_id` (blocking).
+    ///
+    /// Usually unnecessary: the first `config_changed` for each new view
+    /// carries the full config, and subsequent ones are diffs. Useful for
+    /// tests and after reconnect.
+    pub fn get_config(&self, view_id: ViewId) -> Result<Config> {
+        let payload = json!({ "view_id": view_id });
+        let result = self.peer.send_rpc_request("get_config", &payload)?;
+        Ok(serde_json::from_value(result)?)
+    }
+
+    /// Modifies user config. `changes` is a JSON object; a `null` value
+    /// deletes the key.
+    ///
+    /// Rejections (invalid changes, or `General`/`Syntax` when file-based
+    /// config is enabled) surface as [`Event::Alert`], not as an error
+    /// return. Do not assume success just because this returned `Ok(())`.
+    pub fn modify_user_config(
+        &self,
+        domain: ConfigDomain,
+        changes: Value,
+    ) -> Result<()> {
+        let payload = json!({
+            "domain": serde_json::to_value(&domain)?,
+            "changes": changes,
+        });
+        self.peer.send_rpc_notification("modify_user_config", &payload);
         Ok(())
     }
 
@@ -445,7 +563,7 @@ impl XiClient {
         self.send_edit(view_id, "reindent", json!([]))
     }
 
-    // ───────────────────────── Movement (basic) ─────────────────────────
+    // ───────────────────────── Movement ─────────────────────────
 
     pub fn move_up(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "move_up", json!([]))
@@ -479,8 +597,6 @@ impl XiClient {
         self.send_edit(view_id, "move_right_and_modify_selection", json!([]))
     }
 
-    // ───────────────────────── Selection ─────────────────────────
-
     pub fn select_all(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "select_all", json!([]))
     }
@@ -506,7 +622,7 @@ impl XiClient {
         self.send_edit(view_id, "gesture", json!({ "line": line, "col": col, "ty": ty_json }))
     }
 
-    // ───────────────────────── Clipboard (sync requests) ─────────────────────────
+    // ───────────────────────── Clipboard ─────────────────────────
 
     pub fn cut(&self, view_id: ViewId) -> Result<Option<String>> {
         self.send_sync_edit(view_id, "cut")
@@ -613,5 +729,36 @@ mod tests {
         assert_eq!(parse_view_id(&json!("view-id-42")), Some(ViewId(42)));
         assert_eq!(parse_view_id(&json!("nope")), None);
         assert_eq!(parse_view_id(&json!(7)), None);
+    }
+
+    #[test]
+    fn client_started_params_empty_by_default() {
+        let opts = SpawnOptions::default();
+        assert_eq!(client_started_params(&opts), json!({}));
+    }
+
+    #[test]
+    fn client_started_params_with_config_dir() {
+        let opts = SpawnOptions {
+            config_dir: Some(PathBuf::from("/tmp/cfg")),
+            ..Default::default()
+        };
+        assert_eq!(
+            client_started_params(&opts),
+            json!({"config_dir": "/tmp/cfg"})
+        );
+    }
+
+    #[test]
+    fn client_started_params_with_both_dirs() {
+        let opts = SpawnOptions {
+            config_dir: Some(PathBuf::from("/cfg")),
+            client_extras_dir: Some(PathBuf::from("/extras")),
+            ..Default::default()
+        };
+        assert_eq!(
+            client_started_params(&opts),
+            json!({"config_dir": "/cfg", "client_extras_dir": "/extras"})
+        );
     }
 }
