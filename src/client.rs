@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde_json::{json, Value};
 
-use xi_rpc::{Handler, RemoteError, RpcCtx, RpcLoop, RpcPeer};
+use xi_rpc::{Handler, Peer, RemoteError, RpcCtx, RpcLoop, RpcPeer};
 
 use crate::document::DocumentState;
 use crate::events::Event;
