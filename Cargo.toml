@@ -1,9 +1,13 @@
 [package]
 name = "xi-client"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "SDK for talking to xi-core. No GUI deps."
 license = "Apache-2.0"
+repository = "https://github.com/loc-oss/xi-client"
+readme = "README.md"
+keywords = ["editor", "text-editor", "sdk", "xi", "json-rpc"]
+categories = ["development-tools", "text-editors"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
