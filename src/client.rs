@@ -14,11 +14,19 @@ use crate::process::{SharedStdin, XiProcess};
 use crate::types::{Config, ConfigDomain, GestureType, SpawnOptions, Style, Update, ViewId};
 use crate::{Error, Result};
 
+/// Width-measuring callback installed via [`XiClient::set_width_measure`].
+///
+/// Runs on the reader thread. Must not call back into `XiClient` or send
+/// RPCs — that would deadlock, since the reader thread is the one that
+/// dispatches responses.
+type WidthMeasureFn = dyn Fn(&[String]) -> Vec<f64> + Send + Sync;
+
 struct Inner {
     docs: HashMap<ViewId, DocumentState>,
     styles: HashMap<u64, Style>,
     pending_updates: HashMap<ViewId, Vec<Update>>,
     next_request_id: u64,
+    width_measure: Option<Arc<WidthMeasureFn>>,
 }
 
 struct ClientHandler {
@@ -67,7 +75,14 @@ impl Handler for ClientHandler {
         };
 
         match method {
-            "measure_width" => Ok(json!(measure_width(rpc.get("params")))),
+            "measure_width" => {
+                // Clone the Arc out of the lock, drop the guard, then call.
+                // A callback that reenters `Inner` (e.g. `XiClient::document`)
+                // will not deadlock; one that sends RPCs will.
+                let cb = self.inner.lock().unwrap().width_measure.clone();
+                let widths = measure_width(rpc.get("params"), cb.as_deref());
+                Ok(json!(widths))
+            }
             other => Err(RemoteError::custom(
                 404,
                 format!("method not found: {other}"),
@@ -234,22 +249,41 @@ fn parse_view_id(v: &Value) -> Option<ViewId> {
     serde_json::from_value(v.clone()).ok()
 }
 
-fn measure_width(params: Option<&Value>) -> Vec<Vec<f64>> {
+/// Resolves a `measure_width` request into per-item width vectors.
+///
+/// If `callback` is `Some`, it is invoked once per input item; the returned
+/// widths are padded or truncated to match `strings.len()`. If it's `None`,
+/// falls back to the `CodepointMono` policy (one column per Unicode scalar).
+fn measure_width(
+    params: Option<&Value>,
+    callback: Option<&WidthMeasureFn>,
+) -> Vec<Vec<f64>> {
     let Some(items) = params.and_then(Value::as_array) else {
         return Vec::new();
     };
     items
         .iter()
         .map(|item| {
-            item.get("strings")
-                .and_then(Value::as_array)
-                .map(|strings| {
-                    strings
+            let strings = item.get("strings").and_then(Value::as_array);
+            let Some(strings) = strings else {
+                return Vec::new();
+            };
+            match callback {
+                Some(cb) => {
+                    let owned: Vec<String> = strings
                         .iter()
-                        .map(|s| s.as_str().map_or(0.0, |s| s.chars().count() as f64))
-                        .collect()
-                })
-                .unwrap_or_default()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect();
+                    let mut widths = cb(&owned);
+                    widths.resize(owned.len(), 0.0);
+                    widths
+                }
+                None => strings
+                    .iter()
+                    .map(|v| v.as_str().map_or(0.0, |s| s.chars().count() as f64))
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -271,24 +305,16 @@ pub struct XiClient {
     event_rx: Receiver<Event>,
     event_tx: Sender<Event>,
     stdin: SharedStdin,
-    /// Set to `true` by the reader thread just before it exits; waited on by
-    /// [`XiClient::wait_for_exit`].
     reader_exit: Arc<(Mutex<bool>, Condvar)>,
-    /// Cached exit status, populated by [`XiClient::wait_for_exit`].
     exit_status: Mutex<Option<std::process::ExitStatus>>,
     _process: XiProcess,
 }
 
 impl XiClient {
-    /// Spawns with default [`SpawnOptions`].
     pub fn spawn(core_path: impl AsRef<Path>) -> Result<Self> {
         Self::spawn_with_options(core_path, SpawnOptions::default())
     }
 
-    /// Spawns with explicit [`SpawnOptions`].
-    ///
-    /// `client_started` is sent immediately (before returning), with
-    /// `config_dir` / `client_extras_dir` if provided.
     pub fn spawn_with_options(core_path: impl AsRef<Path>, opts: SpawnOptions) -> Result<Self> {
         let process = XiProcess::spawn_with_options(core_path, &opts)?;
         let stdin_raw = process
@@ -306,6 +332,7 @@ impl XiClient {
             styles: HashMap::new(),
             pending_updates: HashMap::new(),
             next_request_id: 0,
+            width_measure: None,
         }));
 
         let mut looper = RpcLoop::new(stdin.clone());
@@ -350,17 +377,7 @@ impl XiClient {
 
     // ───────────────────────── Lifecycle ─────────────────────────
 
-    /// Waits for the reader thread to observe EOF and then reaps the child.
-    ///
-    /// **Does not initiate shutdown.** Call [`shutdown`] first if you want
-    /// the process to exit; otherwise this waits up to `timeout` for the
-    /// process to exit on its own (e.g. crash) and returns an error.
-    ///
-    /// Idempotent: subsequent calls return the cached exit status.
-    pub fn wait_for_exit(
-        &self,
-        timeout: Duration,
-    ) -> Result<std::process::ExitStatus> {
+    pub fn wait_for_exit(&self, timeout: Duration) -> Result<std::process::ExitStatus> {
         if let Some(status) = *self.exit_status.lock().unwrap() {
             return Ok(status);
         }
@@ -389,6 +406,33 @@ impl XiClient {
         let status = self._process.wait()?;
         *cache = Some(status);
         Ok(status)
+    }
+
+    // ───────────────────────── Width measure ─────────────────────────
+
+    /// Installs a callback that replaces the default `CodepointMono` width
+    /// policy. Called whenever xi-core sends `measure_width` (i.e. for word
+    /// wrap, once `word_wrap: true` is set in config).
+    ///
+    /// # Threading
+    ///
+    /// The callback runs on the **reader thread**. It must not call back
+    /// into `XiClient` or send RPCs — that would deadlock, because the
+    /// reader thread is the one that dispatches responses.
+    ///
+    /// Reading `document()` from the callback is safe (it only locks
+    /// `Inner`), but doing heavy work there will stall inbound message
+    /// processing.
+    pub fn set_width_measure<F>(&self, f: F)
+    where
+        F: Fn(&[String]) -> Vec<f64> + Send + Sync + 'static,
+    {
+        self.inner.lock().unwrap().width_measure = Some(Arc::new(f));
+    }
+
+    /// Restores the default `CodepointMono` policy.
+    pub fn clear_width_measure(&self) {
+        self.inner.lock().unwrap().width_measure = None;
     }
 
     // ───────────────────────── Views ─────────────────────────
@@ -443,8 +487,6 @@ impl XiClient {
         Ok(())
     }
 
-    /// Returns the ids of all views currently known to the SDK, in
-    /// ascending order.
     pub fn view_ids(&self) -> Vec<ViewId> {
         let lock = self.inner.lock().unwrap();
         let mut ids: Vec<ViewId> = lock.docs.keys().copied().collect();
@@ -463,28 +505,13 @@ impl XiClient {
 
     // ───────────────────────── Config ─────────────────────────
 
-    /// Fetches the merged config for `view_id` (blocking).
-    ///
-    /// Usually unnecessary: the first `config_changed` for each new view
-    /// carries the full config, and subsequent ones are diffs. Useful for
-    /// tests and after reconnect.
     pub fn get_config(&self, view_id: ViewId) -> Result<Config> {
         let payload = json!({ "view_id": view_id });
         let result = self.peer.send_rpc_request("get_config", &payload)?;
         Ok(serde_json::from_value(result)?)
     }
 
-    /// Modifies user config. `changes` is a JSON object; a `null` value
-    /// deletes the key.
-    ///
-    /// Rejections (invalid changes, or `General`/`Syntax` when file-based
-    /// config is enabled) surface as [`Event::Alert`], not as an error
-    /// return. Do not assume success just because this returned `Ok(())`.
-    pub fn modify_user_config(
-        &self,
-        domain: ConfigDomain,
-        changes: Value,
-    ) -> Result<()> {
+    pub fn modify_user_config(&self, domain: ConfigDomain, changes: Value) -> Result<()> {
         let payload = json!({
             "domain": serde_json::to_value(&domain)?,
             "changes": changes,
@@ -615,6 +642,16 @@ impl XiClient {
         self.send_edit(view_id, "scroll", json!([first, last]))
     }
 
+    /// Asks xi-core to make lines `first..last` valid, sending `update` for
+    /// any that are currently invalid.
+    ///
+    /// Call after `scroll` when the viewport enters territory not yet loaded.
+    /// Without this, xi-core keeps only the initial viewport valid; scrolling
+    /// far away shows blank lines.
+    pub fn request_lines(&self, view_id: ViewId, first: u64, last: u64) -> Result<()> {
+        self.send_edit(view_id, "request_lines", json!([first, last]))
+    }
+
     // ───────────────────────── Gestures ─────────────────────────
 
     pub fn gesture(&self, view_id: ViewId, line: u64, col: u64, ty: GestureType) -> Result<()> {
@@ -702,7 +739,7 @@ mod tests {
             {"id": 3, "strings": ["foo"]}
         ]);
         assert_eq!(
-            measure_width(Some(&params)),
+            measure_width(Some(&params), None),
             vec![vec![5.0, 5.0], vec![3.0]]
         );
     }
@@ -710,16 +747,51 @@ mod tests {
     #[test]
     fn measure_width_handles_multibyte() {
         let params = json!([{"id": 1, "strings": ["привет"]}]);
-        assert_eq!(measure_width(Some(&params)), vec![vec![6.0]]);
+        assert_eq!(measure_width(Some(&params), None), vec![vec![6.0]]);
     }
 
     #[test]
     fn measure_width_empty_and_missing() {
-        assert_eq!(measure_width(None), Vec::<Vec<f64>>::new());
-        assert_eq!(measure_width(Some(&json!([]))), Vec::<Vec<f64>>::new());
+        assert_eq!(measure_width(None, None), Vec::<Vec<f64>>::new());
+        assert_eq!(measure_width(Some(&json!([])), None), Vec::<Vec<f64>>::new());
         assert_eq!(
-            measure_width(Some(&json!([{"id": 1}]))),
+            measure_width(Some(&json!([{"id": 1}])), None),
             vec![Vec::<f64>::new()]
+        );
+    }
+
+    #[test]
+    fn measure_width_uses_callback() {
+        let params = json!([
+            {"id": 2, "strings": ["hello", "world"]},
+            {"id": 3, "strings": ["foo"]}
+        ]);
+        let cb = |strings: &[String]| -> Vec<f64> {
+            strings.iter().map(|_| 42.0).collect()
+        };
+        assert_eq!(
+            measure_width(Some(&params), Some(&cb)),
+            vec![vec![42.0, 42.0], vec![42.0]]
+        );
+    }
+
+    #[test]
+    fn measure_width_pads_short_callback_output() {
+        let params = json!([{"id": 1, "strings": ["a", "b", "c"]}]);
+        let cb = |_: &[String]| -> Vec<f64> { vec![1.0] };
+        assert_eq!(
+            measure_width(Some(&params), Some(&cb)),
+            vec![vec![1.0, 0.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn measure_width_truncates_long_callback_output() {
+        let params = json!([{"id": 1, "strings": ["a"]}]);
+        let cb = |_: &[String]| -> Vec<f64> { vec![1.0, 2.0, 3.0] };
+        assert_eq!(
+            measure_width(Some(&params), Some(&cb)),
+            vec![vec![1.0]]
         );
     }
 

@@ -498,3 +498,74 @@ fn modify_user_config_user_override_updates_view() {
 
     shutdown_and_wait(&client);
 }
+
+// ───────────────────────── Phase 2: viewport & width measure ─────────────────────────
+
+#[test]
+fn request_lines_does_not_panic() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    client.insert(view_id, "hello\nworld\n").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines.len() >= 2
+    }));
+
+    // Request a range fully within the already-valid area: xi-core treats it
+    // as a no-op but must accept the RPC.
+    client.request_lines(view_id, 0, 2).expect("request_lines");
+
+    // Request a range beyond the document: xi-core must not crash and should
+    // emit at most an Alert (which we don't assert on, since behavior varies).
+    client.request_lines(view_id, 100, 200).expect("request_lines oob");
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn set_width_measure_registers_callback() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+
+    // Callback that returns fixed widths; the fact that we can register it
+    // and continue operating is the assertion.
+    client.set_width_measure(|strings| {
+        strings.iter().map(|s| s.chars().count() as f64 * 7.5).collect()
+    });
+
+    let view_id = client.new_view(None).expect("new_view");
+    client.resize(view_id, 800, 600).expect("resize");
+    client.insert(view_id, "hello").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("hello")
+    }));
+
+    // Clear and verify we can still operate.
+    client.clear_width_measure();
+    client.insert(view_id, " world").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("world")
+    }));
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn resize_then_scroll_does_not_stall() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    client.resize(view_id, 800, 600).expect("resize");
+    client.scroll(view_id, 0, 24).expect("scroll");
+    client.request_lines(view_id, 0, 24).expect("request_lines");
+
+    // Small content, then confirm the pipeline still works end-to-end.
+    client.insert(view_id, "abc").expect("insert");
+    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+        doc.lines[0].text.contains("abc")
+    }));
+
+    shutdown_and_wait(&client);
+}
