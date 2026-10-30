@@ -1,6 +1,6 @@
 [package]
 name = "xi-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "SDK for talking to xi-core. No GUI deps."
 license = "Apache-2.0"
