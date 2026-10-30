@@ -55,6 +55,14 @@ impl Handler for ClientHandler {
             "scroll_to" => self.on_scroll_to(params),
             "find_status" => self.on_find_status(params),
             "replace_status" => self.on_replace_status(params),
+            "show_hover" => self.on_show_hover(params),
+            "available_plugins" => self.on_available_plugins(params),
+            "plugin_started" => self.on_plugin_started(params),
+            "plugin_stopped" => self.on_plugin_stopped(params),
+            "update_cmds" => self.on_update_cmds(params),
+            "add_status_item" => self.on_add_status_item(params),
+            "update_status_item" => self.on_update_status_item(params),
+            "remove_status_item" => self.on_remove_status_item(params),
             "available_languages" => self.on_available_languages(params),
             "available_themes" => self.on_available_themes(params),
             _ => {
@@ -243,6 +251,147 @@ impl ClientHandler {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         self.send_event(Event::ReplaceStatus { view_id, chars, preserve_case });
+    }
+
+        fn on_show_hover(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let request_id = params.get("request_id").and_then(Value::as_u64).unwrap_or(0);
+        let result = params
+            .get("result")
+            .and_then(|v| serde_json::from_value::<crate::types::Hover>(v.clone()).ok());
+        self.send_event(Event::HoverShown { view_id, request_id, result });
+    }
+
+    fn on_available_plugins(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        // Wire format: `{"plugins": [{"name": "...", "running": true}, ...]}`
+        let plugins = params
+            .get("plugins")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let name = p.get("name").and_then(Value::as_str)?.to_string();
+                        let running = p.get("running").and_then(Value::as_bool).unwrap_or(false);
+                        Some((name, running))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.send_event(Event::AvailablePlugins { view_id, plugins });
+    }
+
+    fn on_plugin_started(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let Some(plugin) = params.get("plugin").and_then(Value::as_str) else {
+            return;
+        };
+        self.send_event(Event::PluginStarted {
+            view_id,
+            plugin: plugin.to_string(),
+        });
+    }
+
+    fn on_plugin_stopped(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let Some(plugin) = params.get("plugin").and_then(Value::as_str) else {
+            return;
+        };
+        let code = params.get("code").and_then(Value::as_i64).unwrap_or(0) as i32;
+        self.send_event(Event::PluginStopped {
+            view_id,
+            plugin: plugin.to_string(),
+            code,
+        });
+    }
+
+    fn on_update_cmds(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let Some(plugin) = params.get("plugin").and_then(Value::as_str) else {
+            return;
+        };
+        let cmds = params
+            .get("cmds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.send_event(Event::PluginCommands {
+            view_id,
+            plugin: plugin.to_string(),
+            cmds,
+        });
+    }
+
+    fn on_add_status_item(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        // `source`, `key`, `value`, `alignment` are all strings on the wire.
+        let Some(source) = params.get("source").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(key) = params.get("key").and_then(Value::as_str) else {
+            return;
+        };
+        let value = params.get("value").and_then(Value::as_str).unwrap_or("").to_string();
+        let alignment = params
+            .get("alignment")
+            .and_then(Value::as_str)
+            .unwrap_or("left")
+            .to_string();
+        self.send_event(Event::StatusItemAdded {
+            view_id,
+            source: source.to_string(),
+            key: key.to_string(),
+            value,
+            alignment,
+        });
+    }
+
+    fn on_update_status_item(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let Some(key) = params.get("key").and_then(Value::as_str) else {
+            return;
+        };
+        let value = params.get("value").and_then(Value::as_str).unwrap_or("").to_string();
+        self.send_event(Event::StatusItemUpdated {
+            view_id,
+            key: key.to_string(),
+            value,
+        });
+    }
+
+    fn on_remove_status_item(&mut self, params: Option<Value>) {
+        let Some(params) = params else { return };
+        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
+            return;
+        };
+        let Some(key) = params.get("key").and_then(Value::as_str) else {
+            return;
+        };
+        self.send_event(Event::StatusItemRemoved {
+            view_id,
+            key: key.to_string(),
+        });
     }
 
     fn on_available_languages(&mut self, params: Option<Value>) {

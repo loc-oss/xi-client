@@ -105,4 +105,61 @@ pub enum Event {
     ///
     /// Sent once after `client_started`.
     AvailableThemes { themes: Vec<String> },
+
+        // ───────────────────────── Phase 5: IDE features ─────────────────────────
+
+    /// A `show_hover` notification — the response to a `request_hover`.
+    ///
+    /// `request_id` echoes the value passed to [`crate::XiClient::request_hover`].
+    /// `result` is `None` if the position has no hover info.
+    HoverShown {
+        view_id: ViewId,
+        request_id: u64,
+        result: Option<crate::types::Hover>,
+    },
+
+    /// An `available_plugins` notification. Sent once per view after
+    /// `new_view`, and again when plugins are installed/removed.
+    ///
+    /// Each tuple is `(plugin_name, is_running)`.
+    AvailablePlugins {
+        view_id: ViewId,
+        plugins: Vec<(String, bool)>,
+    },
+
+    /// A `plugin_started` notification.
+    PluginStarted { view_id: ViewId, plugin: String },
+
+    /// A `plugin_stopped` notification.
+    ///
+    /// `code == 0` means normal exit; `code == 1` means crash.
+    PluginStopped { view_id: ViewId, plugin: String, code: i32 },
+
+    /// An `update_cmds` notification: a plugin has registered or updated
+    /// commands. `cmds` is a raw JSON array; the schema is defined by the
+    /// plugin.
+    PluginCommands {
+        view_id: ViewId,
+        plugin: String,
+        cmds: Vec<serde_json::Value>,
+    },
+
+    /// An `add_status_item` notification from a plugin.
+    StatusItemAdded {
+        view_id: ViewId,
+        source: String,
+        key: String,
+        value: String,
+        alignment: String,
+    },
+
+    /// An `update_status_item` notification.
+    StatusItemUpdated {
+        view_id: ViewId,
+        key: String,
+        value: String,
+    },
+
+    /// A `remove_status_item` notification.
+    StatusItemRemoved { view_id: ViewId, key: String },
 }

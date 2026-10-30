@@ -9,9 +9,9 @@
 //! and they all write to the same `~/.local/share/xi-core/xi-core.log`, so
 //! running them in parallel interleaves the log noise (harmless, but ugly).
 
+use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use serde_json::json;
 
 use xi_client::{DocumentSnapshot, Event, ViewId, XiClient};
 
@@ -37,11 +37,7 @@ macro_rules! core_or_skip {
 /// state after one or more fire-and-forget edits, use [`wait_until_doc`]
 /// instead — a single `DocumentUpdated` does not mean the reader has
 /// applied every pending op.
-fn wait_for<F: Fn(&Event) -> bool>(
-    client: &XiClient,
-    timeout: Duration,
-    pred: F,
-) -> Option<Event> {
+fn wait_for<F: Fn(&Event) -> bool>(client: &XiClient, timeout: Duration, pred: F) -> Option<Event> {
     let rx = client.events();
     let deadline = Instant::now() + timeout;
     loop {
@@ -88,18 +84,15 @@ fn wait_until_doc<F: Fn(&DocumentSnapshot) -> bool>(
 /// Shuts the client down and asserts that `Exited` arrives.
 fn shutdown_and_wait(client: &XiClient) {
     client.shutdown();
-    let exited = wait_for(client, Duration::from_secs(5), |e| matches!(e, Event::Exited));
+    let exited = wait_for(client, Duration::from_secs(5), |e| {
+        matches!(e, Event::Exited)
+    });
     assert!(exited.is_some(), "Exited not received after shutdown");
 }
 
 /// Convenience: panics with the current document line contents if `ok` is
 /// false. Useful for debugging flaky failures.
-fn assert_doc_state(
-    client: &XiClient,
-    view_id: ViewId,
-    ok: bool,
-    what: &str,
-) {
+fn assert_doc_state(client: &XiClient, view_id: ViewId, ok: bool, what: &str) {
     if !ok {
         let lines: Vec<String> = client
             .document(view_id)
@@ -116,7 +109,9 @@ fn spawn_and_shutdown_emits_exited() {
     let core = core_or_skip!();
     let client = XiClient::spawn(&core).expect("spawn");
     client.shutdown();
-    let exited = wait_for(&client, Duration::from_secs(5), |e| matches!(e, Event::Exited));
+    let exited = wait_for(&client, Duration::from_secs(5), |e| {
+        matches!(e, Event::Exited)
+    });
     assert!(exited.is_some(), "Exited not received after shutdown");
 }
 
@@ -125,9 +120,11 @@ fn new_view_empty_emits_view_opened() {
     let core = core_or_skip!();
     let client = XiClient::spawn(&core).expect("spawn");
     let view_id = client.new_view(None).expect("new_view");
-    let ev = wait_for(&client, Duration::from_secs(2), |e| {
-        matches!(e, Event::ViewOpened { view_id: v, .. } if *v == view_id)
-    });
+    let ev = wait_for(
+        &client,
+        Duration::from_secs(2),
+        |e| matches!(e, Event::ViewOpened { view_id: v, .. } if *v == view_id),
+    );
     assert!(ev.is_some(), "ViewOpened not received");
     shutdown_and_wait(&client);
 }
@@ -173,12 +170,17 @@ fn close_view_emits_view_closed() {
 
     client.close_view(view_id).expect("close_view");
 
-    let ev = wait_for(&client, Duration::from_secs(2), |e| {
-        matches!(e, Event::ViewClosed { view_id: v } if *v == view_id)
-    });
+    let ev = wait_for(
+        &client,
+        Duration::from_secs(2),
+        |e| matches!(e, Event::ViewClosed { view_id: v } if *v == view_id),
+    );
     assert!(ev.is_some(), "ViewClosed not received");
     // `document()` is synchronous against Inner; no race here.
-    assert!(client.document(view_id).is_none(), "doc still present after close");
+    assert!(
+        client.document(view_id).is_none(),
+        "doc still present after close"
+    );
 
     shutdown_and_wait(&client);
 }
@@ -213,14 +215,20 @@ fn redo_restores_after_undo() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "abc").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("abc")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("abc") }
+    ));
 
     client.undo(view_id).expect("undo");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        !doc.lines[0].text.contains("abc")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { !doc.lines[0].text.contains("abc") }
+    ));
 
     client.redo(view_id).expect("redo");
     let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
@@ -238,15 +246,20 @@ fn move_left_then_insert_inserts_mid_line() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "abc").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text == "abc"
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text == "abc" }
+    ));
 
     client.move_left(view_id).expect("move_left");
     // Cursor moved, but the text is unchanged — can't wait on text here.
     // Instead, wait until the cursor annotation lands on column 2.
     let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.selections.iter().any(|&(_, sc, _, ec)| sc == 2 && ec == 2)
+        doc.selections
+            .iter()
+            .any(|&(_, sc, _, ec)| sc == 2 && ec == 2)
     });
     assert!(
         ok,
@@ -258,7 +271,12 @@ fn move_left_then_insert_inserts_mid_line() {
     let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
         doc.lines[0].text == "abXc"
     });
-    assert_doc_state(&client, view_id, ok, "insert-at-cursor did not land mid-line");
+    assert_doc_state(
+        &client,
+        view_id,
+        ok,
+        "insert-at-cursor did not land mid-line",
+    );
 
     shutdown_and_wait(&client);
 }
@@ -270,9 +288,12 @@ fn select_all_produces_full_range_selection() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "hello\nworld").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines.len() >= 2 && doc.lines[0].text == "hello"
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines.len() >= 2 && doc.lines[0].text == "hello" }
+    ));
 
     client.select_all(view_id).expect("select_all");
     let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
@@ -314,11 +335,14 @@ fn insert_newline_and_tab() {
     client.insert(view_id, "b").expect("insert");
 
     let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines.len() >= 2
-            && doc.lines[0].text == "a"
-            && doc.lines[1].text.starts_with('b')
+        doc.lines.len() >= 2 && doc.lines[0].text == "a" && doc.lines[1].text.starts_with('b')
     });
-    assert_doc_state(&client, view_id, ok, "newline/tab did not produce expected state");
+    assert_doc_state(
+        &client,
+        view_id,
+        ok,
+        "newline/tab did not produce expected state",
+    );
 
     shutdown_and_wait(&client);
 }
@@ -332,14 +356,20 @@ fn copy_returns_selected_text() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "copy me").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text == "copy me"
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text == "copy me" }
+    ));
 
     client.select_all(view_id).expect("select_all");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        !doc.selections.is_empty()
-    }), "select_all did not register before copy");
+    assert!(
+        wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+            !doc.selections.is_empty()
+        }),
+        "select_all did not register before copy"
+    );
 
     let text = client.copy(view_id).expect("copy");
     assert_eq!(text.as_deref(), Some("copy me"));
@@ -354,14 +384,20 @@ fn cut_empties_the_buffer() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "cut me").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text == "cut me"
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text == "cut me" }
+    ));
 
     client.select_all(view_id).expect("select_all");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        !doc.selections.is_empty()
-    }), "select_all did not register before cut");
+    assert!(
+        wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
+            !doc.selections.is_empty()
+        }),
+        "select_all did not register before cut"
+    );
 
     let text = client.cut(view_id).expect("cut");
     assert_eq!(text.as_deref(), Some("cut me"));
@@ -441,7 +477,9 @@ fn wait_for_exit_is_idempotent() {
     let client = XiClient::spawn(&core).expect("spawn");
     client.shutdown();
     let s1 = client.wait_for_exit(Duration::from_secs(5)).expect("first");
-    let s2 = client.wait_for_exit(Duration::from_secs(1)).expect("second");
+    let s2 = client
+        .wait_for_exit(Duration::from_secs(1))
+        .expect("second");
     assert_eq!(s1, s2);
 }
 
@@ -481,10 +519,7 @@ fn modify_user_config_user_override_updates_view() {
 
     use xi_client::ConfigDomain;
     client
-        .modify_user_config(
-            ConfigDomain::UserOverride(view_id),
-            json!({"tab_size": 2}),
-        )
+        .modify_user_config(ConfigDomain::UserOverride(view_id), json!({"tab_size": 2}))
         .expect("modify_user_config");
 
     let ok = wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
@@ -508,9 +543,12 @@ fn request_lines_does_not_panic() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "hello\nworld\n").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines.len() >= 2
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines.len() >= 2 }
+    ));
 
     // Request a range fully within the already-valid area: xi-core treats it
     // as a no-op but must accept the RPC.
@@ -518,7 +556,9 @@ fn request_lines_does_not_panic() {
 
     // Request a range beyond the document: xi-core must not crash and should
     // emit at most an Alert (which we don't assert on, since behavior varies).
-    client.request_lines(view_id, 100, 200).expect("request_lines oob");
+    client
+        .request_lines(view_id, 100, 200)
+        .expect("request_lines oob");
 
     shutdown_and_wait(&client);
 }
@@ -531,22 +571,31 @@ fn set_width_measure_registers_callback() {
     // Callback that returns fixed widths; the fact that we can register it
     // and continue operating is the assertion.
     client.set_width_measure(|strings| {
-        strings.iter().map(|s| s.chars().count() as f64 * 7.5).collect()
+        strings
+            .iter()
+            .map(|s| s.chars().count() as f64 * 7.5)
+            .collect()
     });
 
     let view_id = client.new_view(None).expect("new_view");
     client.resize(view_id, 800, 600).expect("resize");
     client.insert(view_id, "hello").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("hello")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("hello") }
+    ));
 
     // Clear and verify we can still operate.
     client.clear_width_measure();
     client.insert(view_id, " world").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("world")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("world") }
+    ));
 
     shutdown_and_wait(&client);
 }
@@ -563,13 +612,15 @@ fn resize_then_scroll_does_not_stall() {
 
     // Small content, then confirm the pipeline still works end-to-end.
     client.insert(view_id, "abc").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("abc")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("abc") }
+    ));
 
     shutdown_and_wait(&client);
 }
-
 
 // ───────────────────────── Phase 4: find / replace ─────────────────────────
 
@@ -584,10 +635,15 @@ fn find_emits_find_status() {
     client.resize(view_id, 800, 600).expect("resize");
     client.scroll(view_id, 0, 24).expect("scroll");
 
-    client.insert(view_id, "foo bar foo baz foo").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("foo bar")
-    }));
+    client
+        .insert(view_id, "foo bar foo baz foo")
+        .expect("insert");
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("foo bar") }
+    ));
 
     use xi_client::FindQuery;
     client.find(view_id, &FindQuery::new("foo")).expect("find");
@@ -618,9 +674,12 @@ fn find_all_then_replace_all() {
     client.scroll(view_id, 0, 24).expect("scroll");
 
     client.insert(view_id, "foo foo foo").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text == "foo foo foo"
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text == "foo foo foo" }
+    ));
 
     use xi_client::FindQuery;
 
@@ -660,22 +719,33 @@ fn selection_for_replace_smoke() {
     let view_id = client.new_view(None).expect("new_view");
 
     client.insert(view_id, "old").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text == "old"
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text == "old" }
+    ));
     client.select_all(view_id).expect("select_all");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        !doc.selections.is_empty()
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { !doc.selections.is_empty() }
+    ));
 
-    client.selection_for_replace(view_id).expect("selection_for_replace");
+    client
+        .selection_for_replace(view_id)
+        .expect("selection_for_replace");
     // No assertion on state: xi-core emits a replace_status notification
     // that we surface as Event::ReplaceStatus. We just confirm the RPC
     // doesn't stall the pipeline.
     client.insert(view_id, "new").expect("insert after");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("new")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("new") }
+    ));
 
     shutdown_and_wait(&client);
 }
@@ -686,13 +756,20 @@ fn find_next_wraps_or_moves_smoke() {
     let client = XiClient::spawn(&core).expect("spawn");
     let view_id = client.new_view(None).expect("new_view");
 
-    client.insert(view_id, "a match here, a match there").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("match")
-    }));
+    client
+        .insert(view_id, "a match here, a match there")
+        .expect("insert");
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("match") }
+    ));
 
     use xi_client::{FindOptions, FindQuery};
-    client.find(view_id, &FindQuery::new("match")).expect("find");
+    client
+        .find(view_id, &FindQuery::new("match"))
+        .expect("find");
     std::thread::sleep(Duration::from_millis(50));
 
     client
@@ -702,9 +779,97 @@ fn find_next_wraps_or_moves_smoke() {
     // No hard assertion on selection (depends on xi-core behavior); smoke
     // test that the pipeline still works after find_next.
     client.insert(view_id, "X").expect("insert");
-    assert!(wait_until_doc(&client, view_id, Duration::from_secs(2), |doc| {
-        doc.lines[0].text.contains("X")
-    }));
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("X") }
+    ));
+
+    shutdown_and_wait(&client);
+}
+
+// ───────────────────────── Phase 5: IDE features ─────────────────────────
+
+#[test]
+fn hover_without_plugin_does_not_stall() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    client.insert(view_id, "hello").expect("insert");
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text == "hello" }
+    ));
+
+    // No LSP plugin → xi-core may either emit a HoverShown with result=None
+    // or nothing at all. Both are acceptable; we only check the RPC doesn't
+    // stall the pipeline.
+    use xi_client::Position;
+    client
+        .request_hover(view_id, 42, Some(Position { line: 0, col: 1 }))
+        .expect("request_hover");
+
+    // Confirm the pipeline is alive.
+    client.insert(view_id, "!").expect("insert after");
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("hello!") }
+    ));
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn plugin_start_unknown_plugin_does_not_crash() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    // Named plugin doesn't exist; xi-core will either ignore or emit an
+    // Alert. We only verify the SDK survives.
+    client
+        .plugin_start(view_id, "nonexistent_plugin_xyz")
+        .expect("plugin_start");
+
+    // Small grace period; the failure (if any) is async.
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Pipeline still works.
+    client.insert(view_id, "x").expect("insert");
+    assert!(wait_until_doc(
+        &client,
+        view_id,
+        Duration::from_secs(2),
+        |doc| { doc.lines[0].text.contains("x") }
+    ));
+
+    shutdown_and_wait(&client);
+}
+
+#[test]
+fn available_plugins_emitted_after_new_view() {
+    let core = core_or_skip!();
+    let client = XiClient::spawn(&core).expect("spawn");
+    let view_id = client.new_view(None).expect("new_view");
+
+    // xi-core emits `available_plugins` right after `new_view`.
+    // Even with zero plugins installed, the event should fire (with an
+    // empty vec).
+    let ev = wait_for(
+        &client,
+        Duration::from_secs(2),
+        |e| matches!(e, Event::AvailablePlugins { view_id: v, .. } if *v == view_id),
+    );
+    assert!(
+        ev.is_some(),
+        "AvailablePlugins not emitted for new view (did xi-core skip it?)"
+    );
 
     shutdown_and_wait(&client);
 }

@@ -55,9 +55,30 @@ fn line_decodes_delta_styles() {
     let json = r#"{"text":"abcdefghij","styles":[0,5,3,-2,4,5,0,3,8]}"#;
     let line: Line = serde_json::from_str(json).unwrap();
     assert_eq!(line.styles.len(), 3);
-    assert_eq!(line.styles[0], StyleDef { delta: 0, length: 5, style_id: 3 });
-    assert_eq!(line.styles[1], StyleDef { delta: -2, length: 4, style_id: 5 });
-    assert_eq!(line.styles[2], StyleDef { delta: 0, length: 3, style_id: 8 });
+    assert_eq!(
+        line.styles[0],
+        StyleDef {
+            delta: 0,
+            length: 5,
+            style_id: 3
+        }
+    );
+    assert_eq!(
+        line.styles[1],
+        StyleDef {
+            delta: -2,
+            length: 4,
+            style_id: 5
+        }
+    );
+    assert_eq!(
+        line.styles[2],
+        StyleDef {
+            delta: 0,
+            length: 3,
+            style_id: 8
+        }
+    );
 }
 
 #[test]
@@ -211,7 +232,10 @@ fn config_unknown_keys_are_ignored() {
 
 #[test]
 fn config_none_fields_skip_serialization() {
-    let cfg = Config { tab_size: Some(4), ..Default::default() };
+    let cfg = Config {
+        tab_size: Some(4),
+        ..Default::default()
+    };
     let v = serde_json::to_value(&cfg).unwrap();
     assert_eq!(v, json!({"tab_size": 4}));
 }
@@ -339,7 +363,10 @@ fn find_query_minimal_wire_shape() {
 #[test]
 fn find_query_full_wire_shape() {
     use xi_client::FindQuery;
-    let q = FindQuery::new("h.llo").regex(true).case_sensitive(true).whole_words(true);
+    let q = FindQuery::new("h.llo")
+        .regex(true)
+        .case_sensitive(true)
+        .whole_words(true);
     assert_eq!(
         serde_json::to_value(&q).unwrap(),
         json!({
@@ -369,7 +396,10 @@ fn find_query_builder_chains() {
 #[test]
 fn find_options_default_serializes_to_empty_object() {
     use xi_client::FindOptions;
-    assert_eq!(serde_json::to_value(FindOptions::default()).unwrap(), json!({}));
+    assert_eq!(
+        serde_json::to_value(FindOptions::default()).unwrap(),
+        json!({})
+    );
 }
 
 #[test]
@@ -400,4 +430,43 @@ fn modify_selection_wire_names() {
     ] {
         assert_eq!(serde_json::to_value(variant).unwrap(), json!(wire));
     }
+}
+
+// ───────────────────────── Hover / Position ─────────────────────────
+
+#[test]
+fn position_serializes_as_object() {
+    use xi_client::Position;
+    let p = Position { line: 3, col: 7 };
+    assert_eq!(
+        serde_json::to_value(p).unwrap(),
+        json!({"line": 3, "col": 7})
+    );
+}
+
+#[test]
+fn position_deserializes() {
+    use xi_client::Position;
+    let p: Position = serde_json::from_value(json!({"line": 1, "col": 0})).unwrap();
+    assert_eq!(p.line, 1);
+    assert_eq!(p.col, 0);
+}
+
+#[test]
+fn hover_decodes_with_range() {
+    use xi_client::Hover;
+    let json = json!({
+        "content": "**bold**",
+        "range": [0, 1, 0, 5]
+    });
+    let h: Hover = serde_json::from_value(json).unwrap();
+    assert_eq!(h.content, "**bold**");
+    assert_eq!(h.range, Some(vec![0, 1, 0, 5]));
+}
+
+#[test]
+fn hover_decodes_without_range() {
+    use xi_client::Hover;
+    let h: Hover = serde_json::from_value(json!({"content": "plain"})).unwrap();
+    assert_eq!(h.range, None);
 }

@@ -10,15 +10,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use serde_json::{json, Value};
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use serde_json::{Value, json};
 
 use xi_rpc::{Peer, RpcLoop, RpcPeer};
 
 use crate::document::DocumentState;
 use crate::events::Event;
 use crate::process::{SharedStdin, XiProcess};
-use crate::types::{Config, ConfigDomain, FindOptions, FindQuery, GestureType, SpawnOptions, Style, Update, ViewId};
+use crate::types::{
+    Config, ConfigDomain, FindOptions, FindQuery, GestureType, Position, SpawnOptions, Style,
+    Update, ViewId,
+};
 use crate::{Error, Result};
 
 mod handler;
@@ -240,7 +243,10 @@ impl XiClient {
             (request_id, had_pending)
         };
 
-        let _ = self.event_tx.send(Event::ViewOpened { request_id, view_id });
+        let _ = self.event_tx.send(Event::ViewOpened {
+            request_id,
+            view_id,
+        });
         if had_pending {
             let _ = self.event_tx.send(Event::DocumentUpdated { view_id });
         }
@@ -308,7 +314,8 @@ impl XiClient {
             "domain": serde_json::to_value(&domain)?,
             "changes": changes,
         });
-        self.peer.send_rpc_notification("modify_user_config", &payload);
+        self.peer
+            .send_rpc_notification("modify_user_config", &payload);
         Ok(())
     }
 
@@ -448,7 +455,11 @@ impl XiClient {
     /// Notifies `xi-core` of the viewport size in **px/points**, not device
     /// pixels. Required for word-wrap and for `scroll` to be meaningful.
     pub fn resize(&self, view_id: ViewId, width: u64, height: u64) -> Result<()> {
-        self.send_edit(view_id, "resize", json!({ "width": width, "height": height }))
+        self.send_edit(
+            view_id,
+            "resize",
+            json!({ "width": width, "height": height }),
+        )
     }
 
     /// Notifies `xi-core` of the visible line range.
@@ -473,10 +484,14 @@ impl XiClient {
 
     pub fn gesture(&self, view_id: ViewId, line: u64, col: u64, ty: GestureType) -> Result<()> {
         let ty_json = serde_json::to_value(&ty)?;
-        self.send_edit(view_id, "gesture", json!({ "line": line, "col": col, "ty": ty_json }))
+        self.send_edit(
+            view_id,
+            "gesture",
+            json!({ "line": line, "col": col, "ty": ty_json }),
+        )
     }
 
-        // ───────────────────────── Find & replace ─────────────────────────
+    // ───────────────────────── Find & replace ─────────────────────────
 
     /// Sends a find query. Results arrive asynchronously as
     /// [`Event::FindStatus`] (match count) and `update` annotations.
@@ -547,6 +562,74 @@ impl XiClient {
 
     pub fn copy(&self, view_id: ViewId) -> Result<Option<String>> {
         self.send_sync_edit(view_id, "copy")
+    }
+
+    // ───────────────────────── Hover ─────────────────────────
+
+    /// Requests a hover tooltip at `position`, or at the current cursor if
+    /// `position` is `None`.
+    ///
+    /// `request_id` is opaque and caller-chosen; it will be echoed in
+    /// [`Event::HoverShown`]. It is **not** the RPC id.
+    ///
+    /// Requires a plugin (typically LSP) that can answer hover requests;
+    /// without one, the response will be `None`.
+    pub fn request_hover(
+        &self,
+        view_id: ViewId,
+        request_id: u64,
+        position: Option<Position>,
+    ) -> Result<()> {
+        let mut params = json!({ "request_id": request_id });
+        if let Some(p) = position {
+            params["position"] = json!([p.line, p.col]);
+        }
+        self.send_edit(view_id, "request_hover", params)
+    }
+
+    // ───────────────────────── Plugins ─────────────────────────
+
+    /// Starts the named plugin for `view_id`.
+    ///
+    /// The plugin must be installed in `xi-core`'s plugin dir
+    /// (see [`SpawnOptions::client_extras_dir`]). On success, emits
+    /// [`Event::PluginStarted`]. If the plugin is unknown, xi-core logs an
+    /// error and continues; no event is emitted.
+    pub fn plugin_start(&self, view_id: ViewId, plugin_name: &str) -> Result<()> {
+        let payload = json!({
+            "command": "start",
+            "view_id": view_id,
+            "plugin_name": plugin_name,
+        });
+        self.peer.send_rpc_notification("plugin", &payload);
+        Ok(())
+    }
+
+    /// Stops the named plugin for `view_id`.
+    pub fn plugin_stop(&self, view_id: ViewId, plugin_name: &str) -> Result<()> {
+        let payload = json!({
+            "command": "stop",
+            "view_id": view_id,
+            "plugin_name": plugin_name,
+        });
+        self.peer.send_rpc_notification("plugin", &payload);
+        Ok(())
+    }
+
+    /// Sends a custom notification to the named plugin.
+    ///
+    /// `rpc` must be an object with `"method"` and `"params"`. Responses go
+    /// through [`Event::Alert`], [`Event::StatusItem*`], [`Event::HoverShown`],
+    /// etc.
+    pub fn plugin_rpc(&self, view_id: ViewId, receiver: &str, rpc: Value) -> Result<()> {
+        let payload = json!({
+            "command": "plugin_rpc",
+            "view_id": view_id,
+            "receiver": receiver,
+            "rpc": rpc,
+        });
+        self.peer.send_rpc_notification("plugin", &payload);
+        Ok(())
     }
 
     // ───────────────────────── Theme & language ─────────────────────────

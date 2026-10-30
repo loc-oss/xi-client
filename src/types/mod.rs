@@ -14,6 +14,7 @@ pub mod spawn;
 pub mod style;
 pub mod update;
 pub mod view_id;
+pub mod hover;
 
 pub use config::Config;
 pub use config_domain::ConfigDomain;
@@ -25,3 +26,4 @@ pub use spawn::SpawnOptions;
 pub use style::Style;
 pub use update::{Annotation, Update};
 pub use view_id::ViewId;
+pub use hover::{Hover, Position};
