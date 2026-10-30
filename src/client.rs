@@ -1,3 +1,10 @@
+//! XiClient façade: lifecycle, configuration, editing, movement, viewport,
+//! clipboard, and state access.
+//!
+//! The wire protocol — parsing inbound notifications, dispatching
+//! `measure_width` — lives in [`handler`]; this module only owns the public
+//! API and the shared [`Inner`] state.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -6,13 +13,16 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde_json::{json, Value};
 
-use xi_rpc::{Handler, Peer, RemoteError, RpcCtx, RpcLoop, RpcPeer};
+use xi_rpc::{Peer, RpcLoop, RpcPeer};
 
 use crate::document::DocumentState;
 use crate::events::Event;
 use crate::process::{SharedStdin, XiProcess};
 use crate::types::{Config, ConfigDomain, GestureType, SpawnOptions, Style, Update, ViewId};
 use crate::{Error, Result};
+
+mod handler;
+use handler::ClientHandler;
 
 /// Width-measuring callback installed via [`XiClient::set_width_measure`].
 ///
@@ -21,271 +31,24 @@ use crate::{Error, Result};
 /// dispatches responses.
 type WidthMeasureFn = dyn Fn(&[String]) -> Vec<f64> + Send + Sync;
 
+/// Mutable per-client state, shared between the reader thread and the
+/// application thread.
 struct Inner {
     docs: HashMap<ViewId, DocumentState>,
     styles: HashMap<u64, Style>,
+    /// `update` notifications that arrived before their view was registered.
+    ///
+    /// `xi-core` may push `update` for a view as soon as it responds to
+    /// `new_view`, i.e. before the application thread has had a chance to
+    /// insert the `DocumentState`. Without this buffer, those updates would
+    /// be silently dropped and the document would render empty. Drained by
+    /// [`XiClient::new_view`].
     pending_updates: HashMap<ViewId, Vec<Update>>,
+    /// Monotonic counter for `Event::ViewOpened.request_id`. Reserved for a
+    /// future `new_view_async`; today it's a logical id the caller can
+    /// ignore.
     next_request_id: u64,
     width_measure: Option<Arc<WidthMeasureFn>>,
-}
-
-struct ClientHandler {
-    inner: Arc<Mutex<Inner>>,
-    event_tx: Sender<Event>,
-}
-
-impl ClientHandler {
-    fn send_event(&self, event: Event) {
-        let _ = self.event_tx.send(event);
-    }
-}
-
-impl Handler for ClientHandler {
-    type Notification = Value;
-    type Request = Value;
-
-    fn handle_notification(&mut self, _ctx: &RpcCtx, rpc: Self::Notification) {
-        let Some(method) = rpc.get("method").and_then(Value::as_str) else {
-            return;
-        };
-        let params = rpc.get("params").cloned();
-
-        match method {
-            "update" => self.on_update(params),
-            "def_style" => self.on_def_style(params),
-            "alert" => self.on_alert(params),
-            "config_changed" => self.on_config_changed(params),
-            "language_changed" => self.on_language_changed(params),
-            "theme_changed" => self.on_theme_changed(params),
-            "scroll_to" => self.on_scroll_to(params),
-            "find_status" => self.on_find_status(params),
-            "available_languages" => self.on_available_languages(params),
-            "available_themes" => self.on_available_themes(params),
-            _ => {}
-        }
-    }
-
-    fn handle_request(
-        &mut self,
-        _ctx: &RpcCtx,
-        rpc: Self::Request,
-    ) -> std::result::Result<Value, RemoteError> {
-        let Some(method) = rpc.get("method").and_then(Value::as_str) else {
-            return Err(RemoteError::custom(400, "missing method", None));
-        };
-
-        match method {
-            "measure_width" => {
-                // Clone the Arc out of the lock, drop the guard, then call.
-                // A callback that reenters `Inner` (e.g. `XiClient::document`)
-                // will not deadlock; one that sends RPCs will.
-                let cb = self.inner.lock().unwrap().width_measure.clone();
-                let widths = measure_width(rpc.get("params"), cb.as_deref());
-                Ok(json!(widths))
-            }
-            other => Err(RemoteError::custom(
-                404,
-                format!("method not found: {other}"),
-                None,
-            )),
-        }
-    }
-}
-
-impl ClientHandler {
-    fn on_update(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Ok(update) = serde_json::from_value::<Update>(params) else {
-            return;
-        };
-        let view_id = update.view_id;
-
-        let applied = {
-            let mut lock = self.inner.lock().unwrap();
-            match lock.docs.get_mut(&view_id) {
-                Some(doc) => {
-                    doc.apply(&update);
-                    true
-                }
-                None => {
-                    lock.pending_updates.entry(view_id).or_default().push(update);
-                    false
-                }
-            }
-        };
-
-        if applied {
-            self.send_event(Event::DocumentUpdated { view_id });
-        }
-    }
-
-    fn on_def_style(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Ok(style) = serde_json::from_value::<Style>(params) else {
-            return;
-        };
-        {
-            let mut lock = self.inner.lock().unwrap();
-            lock.styles.insert(style.id, style.clone());
-        }
-        self.send_event(Event::StyleDefined(style));
-    }
-
-    fn on_alert(&mut self, params: Option<Value>) {
-        let Some(msg) = params
-            .as_ref()
-            .and_then(|p| p.get("msg"))
-            .and_then(Value::as_str)
-        else {
-            return;
-        };
-        self.send_event(Event::Alert(msg.to_string()));
-    }
-
-    fn on_config_changed(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
-            return;
-        };
-        let Some(changes_value) = params.get("changes") else {
-            return;
-        };
-
-        let Ok(diff) = serde_json::from_value::<Config>(changes_value.clone()) else {
-            let mut lock = self.inner.lock().unwrap();
-            if let Some(doc) = lock.docs.get_mut(&view_id) {
-                doc.config.merge(changes_value);
-            }
-            return;
-        };
-
-        {
-            let mut lock = self.inner.lock().unwrap();
-            if let Some(doc) = lock.docs.get_mut(&view_id) {
-                doc.config.merge(changes_value);
-            }
-        }
-
-        self.send_event(Event::ConfigChanged { view_id, changes: diff });
-    }
-
-    fn on_language_changed(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
-            return;
-        };
-        let Some(language) = params.get("language_id").and_then(Value::as_str) else {
-            return;
-        };
-        let language = language.to_string();
-        {
-            let mut lock = self.inner.lock().unwrap();
-            if let Some(doc) = lock.docs.get_mut(&view_id) {
-                doc.language = language.clone();
-            }
-        }
-        self.send_event(Event::LanguageChanged { view_id, language });
-    }
-
-    fn on_theme_changed(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Some(name) = params.get("name").and_then(Value::as_str) else {
-            return;
-        };
-        self.send_event(Event::ThemeChanged { name: name.to_string() });
-    }
-
-    fn on_scroll_to(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
-            return;
-        };
-        let line = params.get("line").and_then(Value::as_u64).unwrap_or(0);
-        let col = params.get("col").and_then(Value::as_u64).unwrap_or(0);
-        self.send_event(Event::ScrollTo { view_id, line, col });
-    }
-
-    fn on_find_status(&mut self, params: Option<Value>) {
-        let Some(params) = params else { return };
-        let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
-            return;
-        };
-        let matches = params.get("matches").and_then(Value::as_u64).unwrap_or(0);
-        self.send_event(Event::FindStatus { view_id, matches });
-    }
-
-    fn on_available_languages(&mut self, params: Option<Value>) {
-        let languages = params
-            .as_ref()
-            .and_then(|p| p.get("languages"))
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.send_event(Event::AvailableLanguages { languages });
-    }
-
-    fn on_available_themes(&mut self, params: Option<Value>) {
-        let themes = params
-            .as_ref()
-            .and_then(|p| p.get("themes"))
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.send_event(Event::AvailableThemes { themes });
-    }
-}
-
-fn parse_view_id(v: &Value) -> Option<ViewId> {
-    serde_json::from_value(v.clone()).ok()
-}
-
-/// Resolves a `measure_width` request into per-item width vectors.
-///
-/// If `callback` is `Some`, it is invoked once per input item; the returned
-/// widths are padded or truncated to match `strings.len()`. If it's `None`,
-/// falls back to the `CodepointMono` policy (one column per Unicode scalar).
-fn measure_width(
-    params: Option<&Value>,
-    callback: Option<&WidthMeasureFn>,
-) -> Vec<Vec<f64>> {
-    let Some(items) = params.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .map(|item| {
-            let strings = item.get("strings").and_then(Value::as_array);
-            let Some(strings) = strings else {
-                return Vec::new();
-            };
-            match callback {
-                Some(cb) => {
-                    let owned: Vec<String> = strings
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect();
-                    let mut widths = cb(&owned);
-                    widths.resize(owned.len(), 0.0);
-                    widths
-                }
-                None => strings
-                    .iter()
-                    .map(|v| v.as_str().map_or(0.0, |s| s.chars().count() as f64))
-                    .collect(),
-            }
-        })
-        .collect()
 }
 
 fn client_started_params(opts: &SpawnOptions) -> Value {
@@ -305,16 +68,26 @@ pub struct XiClient {
     event_rx: Receiver<Event>,
     event_tx: Sender<Event>,
     stdin: SharedStdin,
+    /// Set to `true` by the reader thread just before it exits; waited on by
+    /// [`XiClient::wait_for_exit`].
     reader_exit: Arc<(Mutex<bool>, Condvar)>,
+    /// Cached exit status, populated by [`XiClient::wait_for_exit`].
     exit_status: Mutex<Option<std::process::ExitStatus>>,
     _process: XiProcess,
 }
 
 impl XiClient {
+    // ───────────────────────── Lifecycle ─────────────────────────
+
+    /// Spawns with default [`SpawnOptions`].
     pub fn spawn(core_path: impl AsRef<Path>) -> Result<Self> {
         Self::spawn_with_options(core_path, SpawnOptions::default())
     }
 
+    /// Spawns with explicit [`SpawnOptions`].
+    ///
+    /// `client_started` is sent immediately (before returning), with
+    /// `config_dir` / `client_extras_dir` if provided.
     pub fn spawn_with_options(core_path: impl AsRef<Path>, opts: SpawnOptions) -> Result<Self> {
         let process = XiProcess::spawn_with_options(core_path, &opts)?;
         let stdin_raw = process
@@ -348,14 +121,8 @@ impl XiClient {
         std::thread::Builder::new()
             .name("xi-client-reader".into())
             .spawn(move || {
-                let mut handler = ClientHandler {
-                    inner: inner_for_reader,
-                    event_tx: event_tx_for_reader.clone(),
-                };
-                let _ = looper.mainloop(
-                    move || std::io::BufReader::new(stdout),
-                    &mut handler,
-                );
+                let mut handler = ClientHandler::new(inner_for_reader, event_tx_for_reader.clone());
+                let _ = looper.mainloop(move || std::io::BufReader::new(stdout), &mut handler);
                 let _ = event_tx_for_reader.send(Event::Exited);
                 let (lock, cvar) = &*reader_exit_for_thread;
                 *lock.lock().unwrap() = true;
@@ -375,8 +142,13 @@ impl XiClient {
         })
     }
 
-    // ───────────────────────── Lifecycle ─────────────────────────
-
+    /// Waits for the reader thread to observe EOF and then reaps the child.
+    ///
+    /// **Does not initiate shutdown.** Call [`shutdown`] first if you want the
+    /// process to exit; otherwise this waits up to `timeout` for the process
+    /// to exit on its own (e.g. crash) and returns an error.
+    ///
+    /// Idempotent: subsequent calls return the cached exit status.
     pub fn wait_for_exit(&self, timeout: Duration) -> Result<std::process::ExitStatus> {
         if let Some(status) = *self.exit_status.lock().unwrap() {
             return Ok(status);
@@ -416,13 +188,12 @@ impl XiClient {
     ///
     /// # Threading
     ///
-    /// The callback runs on the **reader thread**. It must not call back
-    /// into `XiClient` or send RPCs — that would deadlock, because the
-    /// reader thread is the one that dispatches responses.
+    /// The callback runs on the **reader thread**. It must not call back into
+    /// `XiClient` or send RPCs — that would deadlock, because the reader
+    /// thread is the one that dispatches responses.
     ///
-    /// Reading `document()` from the callback is safe (it only locks
-    /// `Inner`), but doing heavy work there will stall inbound message
-    /// processing.
+    /// Reading `document()` from the callback is safe (it only locks `Inner`),
+    /// but doing heavy work there will stall inbound message processing.
     pub fn set_width_measure<F>(&self, f: F)
     where
         F: Fn(&[String]) -> Vec<f64> + Send + Sync + 'static,
@@ -437,6 +208,12 @@ impl XiClient {
 
     // ───────────────────────── Views ─────────────────────────
 
+    /// Opens a new view on `path` (or an empty buffer if `None`).
+    ///
+    /// Blocks until `xi-core` responds. On success, emits
+    /// [`Event::ViewOpened`] and — if any `update` notifications arrived
+    /// between the response and the insertion of `DocumentState` — one
+    /// [`Event::DocumentUpdated`].
     pub fn new_view(&self, path: Option<PathBuf>) -> Result<ViewId> {
         let params = match path {
             Some(p) => json!({ "file_path": p }),
@@ -471,6 +248,7 @@ impl XiClient {
         Ok(view_id)
     }
 
+    /// Closes a view. Emits [`Event::ViewClosed`] iff the view was known.
     pub fn close_view(&self, view_id: ViewId) -> Result<()> {
         let payload = json!({ "view_id": view_id });
         self.peer.send_rpc_notification("close_view", &payload);
@@ -487,6 +265,7 @@ impl XiClient {
         Ok(())
     }
 
+    /// Returns the ids of all views currently known to the SDK, ascending.
     pub fn view_ids(&self) -> Vec<ViewId> {
         let lock = self.inner.lock().unwrap();
         let mut ids: Vec<ViewId> = lock.docs.keys().copied().collect();
@@ -494,6 +273,9 @@ impl XiClient {
         ids
     }
 
+    /// Saves the buffer to `path`. Errors are reported via [`Event::Alert`],
+    /// **not** as a return value. Do not assume the file exists after `save`
+    /// returns `Ok`.
     pub fn save(&self, view_id: ViewId, path: impl AsRef<Path>) -> Result<()> {
         let payload = json!({
             "view_id": view_id,
@@ -505,12 +287,22 @@ impl XiClient {
 
     // ───────────────────────── Config ─────────────────────────
 
+    /// Fetches the merged config for `view_id` (blocking).
+    ///
+    /// Usually unnecessary: the first `config_changed` for each new view
+    /// carries the full config, and subsequent ones are diffs.
     pub fn get_config(&self, view_id: ViewId) -> Result<Config> {
         let payload = json!({ "view_id": view_id });
         let result = self.peer.send_rpc_request("get_config", &payload)?;
         Ok(serde_json::from_value(result)?)
     }
 
+    /// Modifies user config. `changes` is a JSON object; a `null` value
+    /// deletes the key.
+    ///
+    /// Rejections (invalid changes, or `General`/`Syntax` when file-based
+    /// config is enabled) surface as [`Event::Alert`], not as an error
+    /// return. Do not assume success just because this returned `Ok(())`.
     pub fn modify_user_config(&self, domain: ConfigDomain, changes: Value) -> Result<()> {
         let payload = json!({
             "domain": serde_json::to_value(&domain)?,
@@ -522,70 +314,87 @@ impl XiClient {
 
     // ───────────────────────── Editing ─────────────────────────
 
+    /// Inserts `chars` at every cursor.
     pub fn insert(&self, view_id: ViewId, chars: &str) -> Result<()> {
         self.send_edit(view_id, "insert", json!({ "chars": chars }))
     }
 
+    /// Deletes one character before every cursor.
     pub fn delete_backward(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "delete_backward", json!([]))
     }
 
+    /// Deletes one character after every cursor.
     pub fn delete_forward(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "delete_forward", json!([]))
     }
 
+    /// Inserts a newline at every cursor.
     pub fn insert_newline(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "insert_newline", json!([]))
     }
 
+    /// Inserts a tab at every cursor (honors `translate_tabs_to_spaces`).
     pub fn insert_tab(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "insert_tab", json!([]))
     }
 
+    /// Undoes the last edit.
     pub fn undo(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "undo", json!([]))
     }
 
+    /// Redoes the last undone edit.
     pub fn redo(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "redo", json!([]))
     }
 
+    /// Deletes one word before every cursor.
     pub fn delete_word_backward(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "delete_word_backward", json!([]))
     }
 
+    /// Deletes one word after every cursor.
     pub fn delete_word_forward(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "delete_word_forward", json!([]))
     }
 
+    /// Transposes characters around the cursor.
     pub fn transpose(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "transpose", json!([]))
     }
 
+    /// Duplicates the current line(s).
     pub fn duplicate_line(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "duplicate_line", json!([]))
     }
 
+    /// Uppercases the selection.
     pub fn uppercase(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "uppercase", json!([]))
     }
 
+    /// Lowercases the selection.
     pub fn lowercase(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "lowercase", json!([]))
     }
 
+    /// Capitalizes the selection.
     pub fn capitalize(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "capitalize", json!([]))
     }
 
+    /// Indents the selected line(s).
     pub fn indent(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "indent", json!([]))
     }
 
+    /// Outdents the selected line(s).
     pub fn outdent(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "outdent", json!([]))
     }
 
+    /// Re-indents the selected line(s). No-op without the syntect plugin.
     pub fn reindent(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "reindent", json!([]))
     }
@@ -624,6 +433,8 @@ impl XiClient {
         self.send_edit(view_id, "move_right_and_modify_selection", json!([]))
     }
 
+    // ───────────────────────── Selection ─────────────────────────
+
     pub fn select_all(&self, view_id: ViewId) -> Result<()> {
         self.send_edit(view_id, "select_all", json!([]))
     }
@@ -634,10 +445,16 @@ impl XiClient {
 
     // ───────────────────────── Viewport ─────────────────────────
 
+    /// Notifies `xi-core` of the viewport size in **px/points**, not device
+    /// pixels. Required for word-wrap and for `scroll` to be meaningful.
     pub fn resize(&self, view_id: ViewId, width: u64, height: u64) -> Result<()> {
         self.send_edit(view_id, "resize", json!({ "width": width, "height": height }))
     }
 
+    /// Notifies `xi-core` of the visible line range.
+    ///
+    /// `first..last` are half-open, in **formatted** (soft-wrapped) lines,
+    /// not logical lines.
     pub fn scroll(&self, view_id: ViewId, first: u64, last: u64) -> Result<()> {
         self.send_edit(view_id, "scroll", json!([first, last]))
     }
@@ -688,15 +505,27 @@ impl XiClient {
 
     // ───────────────────────── State access ─────────────────────────
 
+    /// Returns an immutable snapshot of the current state of `view_id`.
+    /// `None` if the view is unknown (closed, or never opened).
     pub fn document(&self, view_id: ViewId) -> Option<crate::DocumentSnapshot> {
         let lock = self.inner.lock().unwrap();
         lock.docs.get(&view_id).map(|doc| doc.snapshot(view_id))
     }
 
+    /// Returns the event channel. Single consumer: `crossbeam_channel::Receiver`
+    /// is not `Clone` for normal channels.
     pub fn events(&self) -> &Receiver<Event> {
         &self.event_rx
     }
 
+    /// Initiates a graceful shutdown.
+    ///
+    /// Closes `xi-core`'s stdin, which makes it exit; the reader thread
+    /// observes EOF on stdout and emits exactly one [`Event::Exited`]. The
+    /// subprocess is reaped by `XiProcess::Drop` when the `XiClient` is
+    /// dropped.
+    ///
+    /// Non-blocking. To wait for the actual exit, use [`wait_for_exit`].
     pub fn shutdown(&self) {
         self.stdin.close();
     }
@@ -731,77 +560,6 @@ impl XiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn measure_width_codepoint_mono() {
-        let params = json!([
-            {"id": 2, "strings": ["hello", "world"]},
-            {"id": 3, "strings": ["foo"]}
-        ]);
-        assert_eq!(
-            measure_width(Some(&params), None),
-            vec![vec![5.0, 5.0], vec![3.0]]
-        );
-    }
-
-    #[test]
-    fn measure_width_handles_multibyte() {
-        let params = json!([{"id": 1, "strings": ["привет"]}]);
-        assert_eq!(measure_width(Some(&params), None), vec![vec![6.0]]);
-    }
-
-    #[test]
-    fn measure_width_empty_and_missing() {
-        assert_eq!(measure_width(None, None), Vec::<Vec<f64>>::new());
-        assert_eq!(measure_width(Some(&json!([])), None), Vec::<Vec<f64>>::new());
-        assert_eq!(
-            measure_width(Some(&json!([{"id": 1}])), None),
-            vec![Vec::<f64>::new()]
-        );
-    }
-
-    #[test]
-    fn measure_width_uses_callback() {
-        let params = json!([
-            {"id": 2, "strings": ["hello", "world"]},
-            {"id": 3, "strings": ["foo"]}
-        ]);
-        let cb = |strings: &[String]| -> Vec<f64> {
-            strings.iter().map(|_| 42.0).collect()
-        };
-        assert_eq!(
-            measure_width(Some(&params), Some(&cb)),
-            vec![vec![42.0, 42.0], vec![42.0]]
-        );
-    }
-
-    #[test]
-    fn measure_width_pads_short_callback_output() {
-        let params = json!([{"id": 1, "strings": ["a", "b", "c"]}]);
-        let cb = |_: &[String]| -> Vec<f64> { vec![1.0] };
-        assert_eq!(
-            measure_width(Some(&params), Some(&cb)),
-            vec![vec![1.0, 0.0, 0.0]]
-        );
-    }
-
-    #[test]
-    fn measure_width_truncates_long_callback_output() {
-        let params = json!([{"id": 1, "strings": ["a"]}]);
-        let cb = |_: &[String]| -> Vec<f64> { vec![1.0, 2.0, 3.0] };
-        assert_eq!(
-            measure_width(Some(&params), Some(&cb)),
-            vec![vec![1.0]]
-        );
-    }
-
-    #[test]
-    fn parse_view_id_round_trip() {
-        assert_eq!(parse_view_id(&json!("view-id-1")), Some(ViewId(1)));
-        assert_eq!(parse_view_id(&json!("view-id-42")), Some(ViewId(42)));
-        assert_eq!(parse_view_id(&json!("nope")), None);
-        assert_eq!(parse_view_id(&json!(7)), None);
-    }
 
     #[test]
     fn client_started_params_empty_by_default() {
