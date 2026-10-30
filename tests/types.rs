@@ -263,3 +263,30 @@ fn public_types_are_send_and_debug() {
     assert_send::<Config>();
     assert_clone::<Config>();
 }
+
+// ───────────────────────── GestureType ─────────────────────────
+
+#[test]
+fn gesture_type_serializes_to_new_format() {
+    use xi_client::types::{GestureType, Granularity};
+
+    let select = GestureType::Select {
+        granularity: Granularity::Point,
+        multi: false,
+    };
+    assert_eq!(
+        serde_json::to_value(&select).unwrap(),
+        json!({"select": {"granularity": "point", "multi": false}})
+    );
+
+    let extend = GestureType::SelectExtend {
+        granularity: Granularity::Line,
+    };
+    assert_eq!(
+        serde_json::to_value(&extend).unwrap(),
+        json!({"select_extend": {"granularity": "line"}})
+    );
+
+    let drag = GestureType::Drag;
+    assert_eq!(serde_json::to_value(&drag).unwrap(), json!("drag"));
+}

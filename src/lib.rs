@@ -13,7 +13,12 @@ pub mod types;
 pub use client::XiClient;
 pub use document::{DocumentSnapshot, LineState, StyleSpan};
 pub use events::Event;
-pub use types::{Annotation, Config, Line, Operation, OperationType, Style, Update, ViewId};
+pub use types::{
+    Annotation, Config, GestureType,
+    Granularity, Line, Operation,
+    OperationType, Style, Update,
+    ViewId,
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

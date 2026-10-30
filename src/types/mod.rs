@@ -5,6 +5,7 @@
 //! façade (`DocumentSnapshot`, `Event`) re-exports or adapts them.
 
 pub mod config;
+pub mod gesture;
 pub mod line;
 pub mod operation;
 pub mod style;
@@ -12,6 +13,7 @@ pub mod update;
 pub mod view_id;
 
 pub use config::Config;
+pub use gesture::{GestureType, Granularity};
 pub use line::{Line, StyleDef};
 pub use operation::{Operation, OperationType};
 pub use style::Style;
