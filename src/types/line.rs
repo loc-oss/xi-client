@@ -43,7 +43,9 @@ pub fn deserialize_styles<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<StyleDe
     let opt = Option::<Vec<i64>>::deserialize(d)?;
     let v = opt.unwrap_or_default();
     if v.len() % 3 != 0 {
-        return Err(serde::de::Error::custom("styles length is not a multiple of 3"));
+        return Err(serde::de::Error::custom(
+            "styles length is not a multiple of 3",
+        ));
     }
     let mut out = Vec::with_capacity(v.len() / 3);
     for chunk in v.chunks_exact(3) {
@@ -71,9 +73,30 @@ mod tests {
         let json = r#"{"text":"abcdefghij","styles":[0,5,3,-2,4,5,0,3,8]}"#;
         let line: Line = serde_json::from_str(json).unwrap();
         assert_eq!(line.styles.len(), 3);
-        assert_eq!(line.styles[0], StyleDef { delta: 0, length: 5, style_id: 3 });
-        assert_eq!(line.styles[1], StyleDef { delta: -2, length: 4, style_id: 5 });
-        assert_eq!(line.styles[2], StyleDef { delta: 0, length: 3, style_id: 8 });
+        assert_eq!(
+            line.styles[0],
+            StyleDef {
+                delta: 0,
+                length: 5,
+                style_id: 3
+            }
+        );
+        assert_eq!(
+            line.styles[1],
+            StyleDef {
+                delta: -2,
+                length: 4,
+                style_id: 5
+            }
+        );
+        assert_eq!(
+            line.styles[2],
+            StyleDef {
+                delta: 0,
+                length: 3,
+                style_id: 8
+            }
+        );
     }
 
     #[test]

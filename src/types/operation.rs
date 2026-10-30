@@ -112,17 +112,13 @@ mod tests {
     #[test]
     fn validates_ins_and_update() {
         // valid: n matches lines.len()
-        let op: Operation = serde_json::from_str(
-            r#"{"op":"ins","n":1,"lines":[{"text":"x"}]}"#,
-        )
-        .unwrap();
+        let op: Operation =
+            serde_json::from_str(r#"{"op":"ins","n":1,"lines":[{"text":"x"}]}"#).unwrap();
         assert!(op.validate().is_ok());
 
         // invalid: n says 2, one line provided
-        let op: Operation = serde_json::from_str(
-            r#"{"op":"ins","n":2,"lines":[{"text":"x"}]}"#,
-        )
-        .unwrap();
+        let op: Operation =
+            serde_json::from_str(r#"{"op":"ins","n":2,"lines":[{"text":"x"}]}"#).unwrap();
         assert_eq!(
             op.validate(),
             Err("op.nb_lines does not match op.lines.len()")
@@ -134,10 +130,8 @@ mod tests {
         let op: Operation = serde_json::from_str(r#"{"op":"copy","n":3}"#).unwrap();
         assert!(op.validate().is_ok());
 
-        let op: Operation = serde_json::from_str(
-            r#"{"op":"skip","n":2,"lines":[{"text":"x"}]}"#,
-        )
-        .unwrap();
+        let op: Operation =
+            serde_json::from_str(r#"{"op":"skip","n":2,"lines":[{"text":"x"}]}"#).unwrap();
         assert_eq!(
             op.validate(),
             Err("non-insert/update op must not carry lines")

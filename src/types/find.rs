@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn find_query_full() {
-        let q = FindQuery::new("h.llo").regex(true).case_sensitive(true).whole_words(true);
+        let q = FindQuery::new("h.llo")
+            .regex(true)
+            .case_sensitive(true)
+            .whole_words(true);
         assert_eq!(
             serde_json::to_value(&q).unwrap(),
             json!({

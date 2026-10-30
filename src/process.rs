@@ -67,8 +67,14 @@ impl XiProcess {
                 .ok();
         }
 
-        let stdin = child.stdin.take().ok_or_else(|| Error::Spawn("нет stdin".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| Error::Spawn("нет stdout".into()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Spawn("нет stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Spawn("нет stdout".into()))?;
 
         Ok(Self {
             child: Mutex::new(child),

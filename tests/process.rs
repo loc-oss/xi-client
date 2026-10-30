@@ -13,10 +13,16 @@ fn spawn_take_stdin_stdout_are_one_shot() {
     assert_eq!(process.path(), std::path::Path::new("sh"));
 
     assert!(process.take_stdin().is_some());
-    assert!(process.take_stdin().is_none(), "take_stdin must be one-shot");
+    assert!(
+        process.take_stdin().is_none(),
+        "take_stdin must be one-shot"
+    );
 
     assert!(process.take_stdout().is_some());
-    assert!(process.take_stdout().is_none(), "take_stdout must be one-shot");
+    assert!(
+        process.take_stdout().is_none(),
+        "take_stdout must be one-shot"
+    );
 
     process.kill();
 }

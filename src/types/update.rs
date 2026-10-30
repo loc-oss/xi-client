@@ -120,8 +120,7 @@ mod tests {
 
     #[test]
     fn annotation_helpers() {
-        let sel: Annotation =
-            serde_json::from_str(r#"{"type":"selection","ranges":[]}"#).unwrap();
+        let sel: Annotation = serde_json::from_str(r#"{"type":"selection","ranges":[]}"#).unwrap();
         let find: Annotation = serde_json::from_str(r#"{"type":"find","ranges":[]}"#).unwrap();
         let other: Annotation = serde_json::from_str(r#"{"type":"other","ranges":[]}"#).unwrap();
         assert!(sel.is_selection() && !sel.is_find());

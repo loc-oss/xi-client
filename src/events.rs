@@ -73,7 +73,11 @@ pub enum Event {
     ///
     /// `line` is a *logical* line (not formatted). `col` is a UTF-8 byte
     /// offset within the line.
-    ScrollTo { view_id: ViewId, line: u64, col: u64 },
+    ScrollTo {
+        view_id: ViewId,
+        line: u64,
+        col: u64,
+    },
 
     /// An `alert` notification. Used by `xi-core` for user-visible errors
     /// (file changed on disk, save failures, plugin crashes, …).
@@ -106,8 +110,7 @@ pub enum Event {
     /// Sent once after `client_started`.
     AvailableThemes { themes: Vec<String> },
 
-        // ───────────────────────── Phase 5: IDE features ─────────────────────────
-
+    // ───────────────────────── Phase 5: IDE features ─────────────────────────
     /// A `show_hover` notification — the response to a `request_hover`.
     ///
     /// `request_id` echoes the value passed to [`crate::XiClient::request_hover`].
@@ -133,7 +136,11 @@ pub enum Event {
     /// A `plugin_stopped` notification.
     ///
     /// `code == 0` means normal exit; `code == 1` means crash.
-    PluginStopped { view_id: ViewId, plugin: String, code: i32 },
+    PluginStopped {
+        view_id: ViewId,
+        plugin: String,
+        code: i32,
+    },
 
     /// An `update_cmds` notification: a plugin has registered or updated
     /// commands. `cmds` is a raw JSON array; the schema is defined by the

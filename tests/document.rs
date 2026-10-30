@@ -4,7 +4,7 @@
 //! stripping contract. The two contracts most likely to regress silently.
 
 use serde_json::json;
-use xi_client::document::{apply_ops, DocumentState};
+use xi_client::document::{DocumentState, apply_ops};
 use xi_client::types::{Line, Operation, StyleDef, Update, ViewId};
 
 fn op(v: serde_json::Value) -> Operation {
@@ -16,7 +16,10 @@ fn update(v: serde_json::Value) -> Update {
 }
 
 fn line(text: &str) -> Line {
-    Line { text: Some(text.into()), ..Default::default() }
+    Line {
+        text: Some(text.into()),
+        ..Default::default()
+    }
 }
 
 fn texts(lines: &[Line]) -> Vec<Option<String>> {
@@ -36,7 +39,10 @@ fn copy_advances_and_appends() {
 #[test]
 fn skip_advances_without_appending() {
     let mut lines = vec![line("a\n"), line("b\n"), line("c\n")];
-    let ops = vec![op(json!({"op":"skip","n":2})), op(json!({"op":"copy","n":1}))];
+    let ops = vec![
+        op(json!({"op":"skip","n":2})),
+        op(json!({"op":"copy","n":1})),
+    ];
     apply_ops(&mut lines, &ops);
     assert_eq!(texts(&lines), vec![Some("c\n".into())]);
 }
@@ -44,12 +50,18 @@ fn skip_advances_without_appending() {
 #[test]
 fn invalidate_appends_blanks_without_advancing() {
     let mut lines = vec![line("a\n"), line("b\n")];
-    let ops = vec![op(json!({"op":"invalidate","n":2})), op(json!({"op":"copy","n":2}))];
+    let ops = vec![
+        op(json!({"op":"invalidate","n":2})),
+        op(json!({"op":"copy","n":2})),
+    ];
     apply_ops(&mut lines, &ops);
     assert_eq!(lines.len(), 4);
     assert_eq!(lines[0].text, None);
     assert_eq!(lines[1].text, None);
-    assert_eq!(texts(&lines[2..]), vec![Some("a\n".into()), Some("b\n".into())]);
+    assert_eq!(
+        texts(&lines[2..]),
+        vec![Some("a\n".into()), Some("b\n".into())]
+    );
 }
 
 #[test]
@@ -203,9 +215,21 @@ fn snapshot_decodes_delta_styles() {
         lines: vec![Line {
             text: Some("abcdefghij\n".into()),
             styles: vec![
-                StyleDef { delta: 0,  length: 5, style_id: 3 },
-                StyleDef { delta: -2, length: 4, style_id: 5 },
-                StyleDef { delta: 0,  length: 3, style_id: 8 },
+                StyleDef {
+                    delta: 0,
+                    length: 5,
+                    style_id: 3,
+                },
+                StyleDef {
+                    delta: -2,
+                    length: 4,
+                    style_id: 5,
+                },
+                StyleDef {
+                    delta: 0,
+                    length: 3,
+                    style_id: 8,
+                },
             ],
             ..Default::default()
         }],
@@ -224,7 +248,10 @@ fn snapshot_strips_exactly_one_trailing_newline() {
     // Regression guard: `trim_end_matches('\n')` would strip *all* trailing
     // newlines. We strip exactly one.
     let doc = DocumentState {
-        lines: vec![Line { text: Some("a\n\n".into()), ..Default::default() }],
+        lines: vec![Line {
+            text: Some("a\n\n".into()),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     assert_eq!(doc.snapshot(ViewId(1)).lines[0].text, "a\n");
@@ -233,7 +260,10 @@ fn snapshot_strips_exactly_one_trailing_newline() {
 #[test]
 fn snapshot_strips_crlf() {
     let doc = DocumentState {
-        lines: vec![Line { text: Some("a\r\n".into()), ..Default::default() }],
+        lines: vec![Line {
+            text: Some("a\r\n".into()),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     assert_eq!(doc.snapshot(ViewId(1)).lines[0].text, "a");
@@ -273,5 +303,8 @@ fn snapshot_carries_view_id_and_metadata() {
     assert_eq!(snap.view_id, Some(ViewId(7)));
     assert_eq!(snap.language, "Rust");
     assert!(!snap.pristine);
-    assert_eq!(snap.path.as_deref(), Some(std::path::Path::new("/tmp/f.rs")));
+    assert_eq!(
+        snap.path.as_deref(),
+        Some(std::path::Path::new("/tmp/f.rs"))
+    );
 }

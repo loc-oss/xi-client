@@ -138,7 +138,11 @@ impl DocumentState {
             view_id: Some(view_id),
             // Invariant (§8.2): even a document with no lines yet reports a
             // single empty line. After the first `update`, this is a no-op.
-            lines: if lines.is_empty() { vec![LineState::default()] } else { lines },
+            lines: if lines.is_empty() {
+                vec![LineState::default()]
+            } else {
+                lines
+            },
             selections: self.selections.clone(),
             pristine: self.pristine,
             path: self.path.clone(),
@@ -173,10 +177,7 @@ pub fn apply_ops(lines: &mut Vec<Line>, ops: &[Operation]) {
     let mut old_ix: usize = 0;
 
     for op in ops {
-        debug_assert!(
-            op.validate().is_ok(),
-            "malformed op from xi-core: {op:?}"
-        );
+        debug_assert!(op.validate().is_ok(), "malformed op from xi-core: {op:?}");
 
         match op.operation_type {
             OperationType::Copy_ => {
@@ -268,9 +269,18 @@ mod tests {
     fn copy_skip_invalidate_ins() {
         // Start: ["a\n", "b\n", "c\n"]
         let mut lines = vec![
-            Line { text: Some("a\n".into()), ..Default::default() },
-            Line { text: Some("b\n".into()), ..Default::default() },
-            Line { text: Some("c\n".into()), ..Default::default() },
+            Line {
+                text: Some("a\n".into()),
+                ..Default::default()
+            },
+            Line {
+                text: Some("b\n".into()),
+                ..Default::default()
+            },
+            Line {
+                text: Some("c\n".into()),
+                ..Default::default()
+            },
         ];
         // copy 1, skip 1, ins 1 ["x\n"], copy 1
         let ops = vec![
@@ -278,7 +288,8 @@ mod tests {
             empty_op("skip", 1),
             serde_json::from_value::<Operation>(json!({
                 "op": "ins", "n": 1, "lines": [{"text": "x\n"}]
-            })).unwrap(),
+            }))
+            .unwrap(),
             empty_op("copy", 1),
         ];
         apply_ops(&mut lines, &ops);
@@ -288,19 +299,32 @@ mod tests {
 
     #[test]
     fn update_with_null_text_keeps_old() {
-        let mut lines = vec![Line { text: Some("keep\n".into()), ..Default::default() }];
-        let ops = vec![serde_json::from_value::<Operation>(json!({
-            "op": "update", "n": 1, "lines": [{"text": null}]
-        })).unwrap()];
+        let mut lines = vec![Line {
+            text: Some("keep\n".into()),
+            ..Default::default()
+        }];
+        let ops = vec![
+            serde_json::from_value::<Operation>(json!({
+                "op": "update", "n": 1, "lines": [{"text": null}]
+            }))
+            .unwrap(),
+        ];
         apply_ops(&mut lines, &ops);
         assert_eq!(lines[0].text.as_deref(), Some("keep\n"));
     }
 
     #[test]
     fn apply_ops_is_atomic_on_empty_batch() {
-        let mut lines = vec![Line { text: Some("a\n".into()), ..Default::default() }];
+        let mut lines = vec![Line {
+            text: Some("a\n".into()),
+            ..Default::default()
+        }];
         apply_ops(&mut lines, &[]);
-        assert_eq!(lines.len(), 0, "empty batch clears — matches xi-core semantics");
+        assert_eq!(
+            lines.len(),
+            0,
+            "empty batch clears — matches xi-core semantics"
+        );
     }
 
     #[test]
@@ -313,9 +337,21 @@ mod tests {
             lines: vec![Line {
                 text: Some("abcdefghij\n".into()),
                 styles: vec![
-                    StyleDef { delta: 0, length: 5, style_id: 3 },
-                    StyleDef { delta: -2, length: 4, style_id: 5 },
-                    StyleDef { delta: 0, length: 3, style_id: 8 },
+                    StyleDef {
+                        delta: 0,
+                        length: 5,
+                        style_id: 3,
+                    },
+                    StyleDef {
+                        delta: -2,
+                        length: 4,
+                        style_id: 5,
+                    },
+                    StyleDef {
+                        delta: 0,
+                        length: 3,
+                        style_id: 8,
+                    },
                 ],
                 ..Default::default()
             }],
@@ -324,9 +360,30 @@ mod tests {
         let snap = doc.snapshot(ViewId(1));
         assert_eq!(snap.lines[0].text, "abcdefghij");
         assert_eq!(snap.lines[0].styles.len(), 3);
-        assert_eq!(snap.lines[0].styles[0], StyleSpan { start: 0, len: 5, style_id: 3 });
-        assert_eq!(snap.lines[0].styles[1], StyleSpan { start: 3, len: 4, style_id: 5 });
-        assert_eq!(snap.lines[0].styles[2], StyleSpan { start: 7, len: 3, style_id: 8 });
+        assert_eq!(
+            snap.lines[0].styles[0],
+            StyleSpan {
+                start: 0,
+                len: 5,
+                style_id: 3
+            }
+        );
+        assert_eq!(
+            snap.lines[0].styles[1],
+            StyleSpan {
+                start: 3,
+                len: 4,
+                style_id: 5
+            }
+        );
+        assert_eq!(
+            snap.lines[0].styles[2],
+            StyleSpan {
+                start: 7,
+                len: 3,
+                style_id: 8
+            }
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use xi_rpc::{Handler, RemoteError, RpcCtx};
 
@@ -114,7 +114,10 @@ impl ClientHandler {
                     true
                 }
                 None => {
-                    lock.pending_updates.entry(view_id).or_default().push(update);
+                    lock.pending_updates
+                        .entry(view_id)
+                        .or_default()
+                        .push(update);
                     false
                 }
             }
@@ -172,7 +175,10 @@ impl ClientHandler {
             }
         }
 
-        self.send_event(Event::ConfigChanged { view_id, changes: diff });
+        self.send_event(Event::ConfigChanged {
+            view_id,
+            changes: diff,
+        });
     }
 
     fn on_language_changed(&mut self, params: Option<Value>) {
@@ -198,7 +204,9 @@ impl ClientHandler {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return;
         };
-        self.send_event(Event::ThemeChanged { name: name.to_string() });
+        self.send_event(Event::ThemeChanged {
+            name: name.to_string(),
+        });
     }
 
     fn on_scroll_to(&mut self, params: Option<Value>) {
@@ -250,19 +258,30 @@ impl ClientHandler {
             .get("preserve_case")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        self.send_event(Event::ReplaceStatus { view_id, chars, preserve_case });
+        self.send_event(Event::ReplaceStatus {
+            view_id,
+            chars,
+            preserve_case,
+        });
     }
 
-        fn on_show_hover(&mut self, params: Option<Value>) {
+    fn on_show_hover(&mut self, params: Option<Value>) {
         let Some(params) = params else { return };
         let Some(view_id) = params.get("view_id").and_then(parse_view_id) else {
             return;
         };
-        let request_id = params.get("request_id").and_then(Value::as_u64).unwrap_or(0);
+        let request_id = params
+            .get("request_id")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let result = params
             .get("result")
             .and_then(|v| serde_json::from_value::<crate::types::Hover>(v.clone()).ok());
-        self.send_event(Event::HoverShown { view_id, request_id, result });
+        self.send_event(Event::HoverShown {
+            view_id,
+            request_id,
+            result,
+        });
     }
 
     fn on_available_plugins(&mut self, params: Option<Value>) {
@@ -349,7 +368,11 @@ impl ClientHandler {
         let Some(key) = params.get("key").and_then(Value::as_str) else {
             return;
         };
-        let value = params.get("value").and_then(Value::as_str).unwrap_or("").to_string();
+        let value = params
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let alignment = params
             .get("alignment")
             .and_then(Value::as_str)
@@ -372,7 +395,11 @@ impl ClientHandler {
         let Some(key) = params.get("key").and_then(Value::as_str) else {
             return;
         };
-        let value = params.get("value").and_then(Value::as_str).unwrap_or("").to_string();
+        let value = params
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         self.send_event(Event::StatusItemUpdated {
             view_id,
             key: key.to_string(),
@@ -434,10 +461,7 @@ fn parse_view_id(v: &Value) -> Option<ViewId> {
 /// If `callback` is `Some`, it is invoked once per input item; the returned
 /// widths are padded or truncated to match `strings.len()`. If it's `None`,
 /// falls back to the `CodepointMono` policy (one column per Unicode scalar).
-fn measure_width(
-    params: Option<&Value>,
-    callback: Option<&WidthMeasureFn>,
-) -> Vec<Vec<f64>> {
+fn measure_width(params: Option<&Value>, callback: Option<&WidthMeasureFn>) -> Vec<Vec<f64>> {
     let Some(items) = params.and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -494,7 +518,10 @@ mod tests {
     #[test]
     fn measure_width_empty_and_missing() {
         assert_eq!(measure_width(None, None), Vec::<Vec<f64>>::new());
-        assert_eq!(measure_width(Some(&json!([])), None), Vec::<Vec<f64>>::new());
+        assert_eq!(
+            measure_width(Some(&json!([])), None),
+            Vec::<Vec<f64>>::new()
+        );
         assert_eq!(
             measure_width(Some(&json!([{"id": 1}])), None),
             vec![Vec::<f64>::new()]
@@ -507,9 +534,7 @@ mod tests {
             {"id": 2, "strings": ["hello", "world"]},
             {"id": 3, "strings": ["foo"]}
         ]);
-        let cb = |strings: &[String]| -> Vec<f64> {
-            strings.iter().map(|_| 42.0).collect()
-        };
+        let cb = |strings: &[String]| -> Vec<f64> { strings.iter().map(|_| 42.0).collect() };
         assert_eq!(
             measure_width(Some(&params), Some(&cb)),
             vec![vec![42.0, 42.0], vec![42.0]]
