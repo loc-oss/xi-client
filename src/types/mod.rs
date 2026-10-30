@@ -1,3 +1,9 @@
+//! Serde types that mirror the xi-core wire protocol.
+//!
+//! See `docs/protocol.md` §8 for the data model. These types are deserialized
+//! directly from `update` / `def_style` / `config_changed` payloads; the SDK
+//! façade (`DocumentSnapshot`, `Event`) re-exports or adapts them.
+
 pub mod config;
 pub mod line;
 pub mod operation;
