@@ -1,9 +1,10 @@
 # xi-client Protocol Reference
 
-**Status:** design + reference
-**Covers:** the `xi-client` crate (this SDK) and the raw `xi-core` JSON-RPC it speaks
-**Authoritative for raw wire:** `xi-editor/rust/core-lib/src/rpc.rs`
-**Authoritative for this document:** this file
+**Status:** Phase 0–5 shipped. This document reflects the SDK as it exists
+on `main` after Phase 5 (hover, plugins, status items).
+**Covers:** the `xi-client` crate (this SDK) and the raw `xi-core` JSON-RPC it speaks.
+**Authoritative for raw wire:** `xi-editor/rust/core-lib/src/rpc.rs`.
+**Authoritative for this document:** this file.
 
 This document has two jobs:
 
@@ -19,27 +20,14 @@ Read §2–§3 first to understand the plumbing, then use §6 and §7 as referen
 - [0. Reading guide](#0-reading-guide)
 - [1. Architectural overview](#1-architectural-overview)
 - [2. Wire protocol (raw `xi-core`)](#2-wire-protocol-raw-xi-core)
-  - [2.1 Transport and framing](#21-transport-and-framing)
-  - [2.2 Message shapes](#22-message-shapes)
-  - [2.3 Correlation and IDs](#23-correlation-and-ids)
-  - [2.4 Protocol quirks](#24-protocol-quirks)
-  - [2.5 Errors](#25-errors)
 - [3. SDK architecture](#3-sdk-architecture)
-  - [3.1 Components](#31-components)
-  - [3.2 Threading model](#32-threading-model)
-  - [3.3 Locking and state ownership](#33-locking-and-state-ownership)
-  - [3.4 Event delivery](#34-event-delivery)
 - [4. Lifecycle](#4-lifecycle)
-  - [4.1 `XiClient::spawn`](#41-xiclient_spawn)
-  - [4.2 Handshake: `client_started`](#42-handshake-client_started)
-  - [4.3 Graceful shutdown](#43-graceful-shutdown)
-  - [4.4 Unexpected exit](#44-unexpected-exit)
 - [5. Raw ↔ SDK mapping](#5-raw--sdk-mapping)
 - [6. SDK API reference](#6-sdk-api-reference)
 - [7. Events reference](#7-events-reference)
 - [8. Data model](#8-data-model)
 - [9. What the SDK handles automatically](#9-what-the-sdk-handles-automatically)
-- [10. Known gaps, bugs, and design notes](#10-known-gaps-bugs-and-design-notes)
+- [10. Known gaps and design notes](#10-known-gaps-and-design-notes)
 - [11. Appendix: raw method catalog](#11-appendix-raw-method-catalog)
 
 ---
@@ -56,49 +44,46 @@ We use four callouts throughout:
 
 > **Auto:** something the SDK does _for_ you, so you don't have to.
 
-> **Status:** implementation progress when it matters.
+> **Not yet:** explicitly not implemented, with a pointer to §10.
 
 ---
 
 ## 1. Architectural overview
 
 ```
-
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ your application │
-│ │
-│ XiClient (methods) Receiver<Event> │
-│ │ ▲ │
-└───────────┼─────────────────────────────────────┼────────────────────────┘
-│ │
-▼ │
-┌───────────────────────────────┐ ┌────────────┴───────────────────────┐
-│ XiClient façade (client.rs) │ │ events.rs (Event enum) │
-│ - RpcWriter (mutexed) │ │ crossbeam_channel::Sender<Event> │
-│ - Arc<Mutex<Inner>> │ └────────────▲───────────────────────┘
-│ - pending request table │ │
-│ - docs / styles state │ │
-└──────┬───────────────┬────────┘ │
-│ │ │
-│ write │ read (reader thread) │
-▼ ▼ │
-┌──────────────┐ ┌──────────────────────────────┴───────────────────────┐
-│ RpcWriter │ │ RpcReader (stdout) │
-│ (stdin) │ │ - reads JSON lines │
-│ │ │ - dispatches: │
-│ │ │ _ response → pending table → event │
-│ │ │ _ notification → state update → event │
-│ │ │ \* request (measure_width) → auto reply │
-└──────┬───────┘ └──────────────────────────────────────────────────────┘
-│
-▼
-ChildStdin
-│
+│  your application                                                        │
+│                                                                          │
+│   XiClient (methods)                            Receiver<Event>          │
+│      │                                              ▲                    │
+└──────┼──────────────────────────────────────────────┼────────────────────┘
+       │                                              │
+       ▼                                              │
+┌──────────────────────────────┐    ┌────────────────┴───────────────────┐
+│ XiClient façade (client.rs)  │    │ events.rs (Event enum)             │
+│ - Arc<Mutex<Inner>>          │    │ crossbeam_channel::Sender<Event>   │
+│ - SharedStdin (closable)     │    └────────────────▲───────────────────┘
+│ - reader JoinHandle state    │                     │
+└──────┬────────────────┬──────┘                     │
+       │                │                            │
+       │ write          │ read (reader thread)       │
+       ▼                ▼                            │
+┌──────────────┐  ┌──────────────────────────────────┴────────────────────┐
+│ SharedStdin  │  │ RpcLoop from xi-rpc (handler = ClientHandler)         │
+│ (Arc<Mutex>) │  │ - reads JSON lines from ChildStdout                   │
+│              │  │ - dispatches:                                         │
+│              │  │   • response  → pending table (owned by xi-rpc)       │
+│              │  │   • notification → Inner update → Event               │
+│              │  │   • request (measure_width) → auto reply              │
+└──────┬───────┘  └───────────────────────────────────────────────────────┘
+       │
+       ▼
+  ChildStdin
+       │
 ┌──────┴───────────────────────────────────────────────────────────────────┐
-│ xi-core subprocess │
-│ stdin ◀── newline-delimited JSON ──▶ stdout │
+│  xi-core subprocess                                                      │
+│   stdin ◀── newline-delimited JSON ──▶ stdout                            │
 └──────────────────────────────────────────────────────────────────────────┘
-
 ```
 
 The SDK sits between your UI and the `xi-core` subprocess. It exposes two things:
@@ -106,7 +91,7 @@ The SDK sits between your UI and the `xi-core` subprocess. It exposes two things
 - **Methods** on `XiClient` that translate into raw JSON-RPC.
 - **Events** on a `crossbeam_channel::Receiver<Event>` for everything `xi-core` pushes back.
 
-The subprocess is started and supervised by the SDK. You never touch `ChildStdin`/`ChildStdout`.
+The subprocess is started and supervised by the SDK. You never touch `ChildStdin` / `ChildStdout`.
 
 ---
 
@@ -136,8 +121,11 @@ Concretely:
 // request
 {"id": 7, "method": "new_view", "params": {"file_path": "/tmp/a.txt"}}
 
-// notification
+// notification (edit namespace)
 {"method": "edit", "params": {"view_id": "view-id-1", "method": "insert", "params": {"chars": "x"}}}
+
+// notification (plugin namespace)
+{"method": "plugin", "params": {"command": "start", "view_id": "view-id-1", "plugin_name": "syntect"}}
 
 // success response
 {"id": 7, "result": "view-id-1"}
@@ -146,12 +134,17 @@ Concretely:
 {"id": 7, "error": {"code": 5, "message": "I/O error"}}
 ```
 
-Note the nesting convention used by xi for its _namespaced_ methods (`edit`, `plugin`): the outer `params` contains an inner `method`/`params`. The SDK flattens this for you (§6.2).
+> **Gotcha:** the two namespaced methods use **different** inner tags:
+>
+> - `edit` uses `"method": "<inner>"` — e.g. `{"method": "edit", "params": {"method": "insert", ...}}`.
+> - `plugin` uses `"command": "<inner>"` — e.g. `{"method": "plugin", "params": {"command": "start", ...}}`.
+>
+> This is inconsistent in `xi-core` but both are authoritative. Sending the wrong tag for `plugin` will cause `xi-core` to exit with `UnknownRequest("missing field command")`. The SDK does this correctly; see §6.7.
 
 ### 2.3 Correlation and IDs
 
-- IDs are **per-direction, monotonically increasing integers**, starting from 0 (the SDK starts from 1; that's fine — the protocol doesn't care).
-- The **SDK** allocates IDs for its outbound requests. `RpcWriter::next_id` owns that counter.
+- IDs are **per-direction, monotonically increasing integers**, starting from 0. The SDK does not care about the exact starting value; `xi-rpc`'s `RpcPeer` allocates them.
+- The **SDK** (via `xi-rpc`) allocates IDs for its outbound requests.
 - `xi-core` allocates its own IDs for its outbound requests (`measure_width` only, see §9.1). The SDK echoes the received `id` verbatim.
 - IDs are never reused.
 
@@ -163,12 +156,14 @@ Note the nesting convention used by xi for its _namespaced_ methods (`edit`, `pl
 4. **No version negotiation.** The protocol is tied to the `xi-core` build.
 5. **`view_id` is a string** of the form `"view-id-<n>"` (`n ≥ 1`), not a number.
 6. **`edit`'s inner method has its `view_id` at the outer `params` level** (§6.2).
-7. **`styles` in `Line` are delta-encoded triplets** (§8.4).
-8. **`copy`/`update` ops interact with `old_ix`** (§8.3).
-9. **`scroll` uses half-open `[first, last)` in _formatted_ (soft-wrapped) lines**, not logical lines.
-10. **`resize` uses px/points**, not device pixels.
+7. **`plugin`'s inner command has its `view_id` in the same params object** (not nested under a second `params`).
+8. **`styles` in `Line` are delta-encoded triplets** (§8.4).
+9. **`copy`/`update` ops interact with `old_ix`** (§8.3).
+10. **`scroll` uses half-open `[first, last)` in _formatted_ (soft-wrapped) lines**, not logical lines.
+11. **`resize` uses px/points**, not device pixels.
+12. **`find_status` carries `queries[i].matches`, not a top-level `matches`.** See §6.2.6.
 
-> **Gotcha:** the docs in `xi-editor/api-docs/` disagree with the source in a couple of places (`set_language` uses `view-id` vs `view_id`; `update.rev` is described as "not in this build" but the plugin-side `update` does carry `rev` — different protocols). The SDK always follows **source**, not the inherited docs.
+> **Gotcha:** the docs in `xi-editor/api-docs/` disagree with the source in a couple of places (`set_language` uses `view-id` vs `view_id`; `find_status` shape; the `plugin` namespace's tag). The SDK always follows **source**, not the inherited docs.
 
 ### 2.5 Errors
 
@@ -197,62 +192,67 @@ Malformed JSON: `xi-core` tears down the connection. The SDK treats EOF as a cle
 
 ### 3.1 Components
 
-| File                                    | Responsibility                                                                                                                                                                                                      |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/process.rs` (`XiProcess`)          | Spawn/kill the `xi-core` subprocess. Owns the `Child`. Exposes `ChildStdin`/`ChildStdout` exactly once via `take_stdin()`/`take_stdout()`.                                                                          |
-| `src/rpc.rs` (`RpcReader`, `RpcWriter`) | Line-oriented JSON I/O. `RpcReader::next → Option<Value>` (blocking). `RpcWriter::{notify, request, respond}`. Owns the outbound `next_id` counter.                                                                 |
-| `src/client.rs` (`XiClient`, `Inner`)   | The façade. Holds the `Arc<Mutex<Inner>>`, the `Receiver<Event>`, and `XiProcess`. `Inner` holds the writer, the in-flight request table, the per-view `DocumentState`, the style registry, and the event `Sender`. |
-| `src/document.rs`                       | `DocumentState` (mutable per-view) and `DocumentSnapshot` (what the UI reads). Contains `apply_ops` (the _ops_ interpreter).                                                                                        |
-| `src/events.rs`                         | The `Event` enum. This is the entire surface the UI observes.                                                                                                                                                       |
-| `src/types/`                            | Serde types that mirror the raw wire (`Line`, `Operation`, `Update`, `Config`, `Style`, `ViewId`, …).                                                                                                               |
+| File                                          | Responsibility                                                                                                                                                                                                                                                                     |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/process.rs` (`XiProcess`, `SharedStdin`) | Spawn/kill the `xi-core` subprocess. Owns the `Child`. `take_stdin()` / `take_stdout()` hand out stdio exactly once. `SharedStdin` wraps `ChildStdin` in `Arc<Mutex<Option<...>>>` so both `RpcLoop` and `XiClient::shutdown` can hold a clone; closing it sends EOF to `xi-core`. |
+| `src/client.rs` (`XiClient`, `Inner`)         | The façade. Holds `Arc<Mutex<Inner>>`, `Receiver<Event>`, `Sender<Event>`, `SharedStdin`, reader-exit state, exit status cache. `Inner` holds the docs, styles, buffered `pending_updates`, `next_request_id`, `width_measure` callback.                                           |
+| `src/client/handler.rs` (`ClientHandler`)     | The protocol layer. Implements `xi_rpc::Handler<Notification=Value, Request=Value>`. Parses inbound notifications into `Event`s and mutates `Inner`. Dispatches `measure_width` requests.                                                                                          |
+| `src/document.rs`                             | `DocumentState` (mutable per-view) and `DocumentSnapshot` (what the UI reads). Contains `apply_ops` (the ops interpreter).                                                                                                                                                         |
+| `src/events.rs`                               | The `Event` enum. The entire surface the UI observes.                                                                                                                                                                                                                              |
+| `src/types/`                                  | Serde types that mirror the raw wire (`Line`, `Operation`, `Update`, `Config`, `Style`, `ViewId`, `FindQuery`, `FindOptions`, `GestureType`, `Hover`, `Position`, `SpawnOptions`, `ConfigDomain`, …).                                                                              |
+
+Wire transport is provided by the **`xi-rpc`** crate (`RpcLoop`, `RawPeer`, `Peer`, `Handler`). The SDK does not implement its own JSON line reader/writer.
 
 ### 3.2 Threading model
 
 Three actors:
 
-1. **Application thread** — your code. Calls `XiClient` methods. Locks `Inner` briefly to write a message or read state.
-2. **Reader thread** — spawned by `XiClient::spawn`. Owns `RpcReader`. Blocks on `RpcReader::next`. For each message:
-   - **Response**: match `id` in `Inner::pending`, dispatch the appropriate handler, possibly emit an `Event`.
-   - **Notification**: update `Inner` state as necessary (e.g. apply `update` to `documents`), emit the corresponding `Event`.
-   - **Request** (`measure_width`): synthesize the response and write it back via `RpcWriter` (also locking `Inner`). **Does not** surface to the UI by default.
-3. **`xi-core` subprocess** — its stdin/stdout are held by `RpcWriter`/`RpcReader`.
+1. **Application thread** — your code. Calls `XiClient` methods. Each method either writes a notification through the shared `RpcPeer`, or performs a synchronous `send_rpc_request` (`new_view`, `get_config`, `cut`, `copy`). Reads state with `document(view_id)`, which briefly locks `Inner`.
 
-There is no dedicated writer thread. The application thread writes directly (through the `Mutex<RpcWriter>`). Since writes are just `write_all` + `flush` on a pipe, this is fine.
+2. **Reader thread** — spawned by `XiClient::spawn` and named `"xi-client-reader"`. Owns `RpcLoop`. For each message:
+   - **Response**: `xi-rpc` matches the `id` in its own pending table and wakes the blocked caller.
+   - **Notification**: `ClientHandler::handle_notification` updates `Inner` (e.g. applies an `update` to `docs`), then sends the corresponding `Event`.
+   - **Request** (`measure_width`): `ClientHandler::handle_request` synthesizes the response and returns it to `xi-rpc`, which writes it back.
+   - **EOF**: sends `Event::Exited`, signals `wait_for_exit`'s condvar, exits.
+
+3. **`xi-core` subprocess** — its stdin/stdout are held by `SharedStdin` (via `RpcLoop`) and `RpcLoop`'s reader (via `ChildStdout`).
+
+There is no dedicated writer thread. The application thread writes directly through `RpcPeer` (which `xi-rpc` internally serializes behind a `Mutex<W>`).
 
 ```
-app thread:  [lock Inner] → write request → [unlock] → wait on event_rx / do other work
-reader thread: [lock Inner] → apply update → send Event → [unlock] → loop
+app thread:    [lock xi-rpc writer] → write request → [unlock] → wait on event_rx
+reader thread: receives notification → [lock Inner] → apply update → [unlock]
+               → send Event → loop
 ```
 
 ### 3.3 Locking and state ownership
 
-`Inner` is the single source of truth. All of the following live in `Inner`:
+`Inner` is the single source of truth. It holds:
 
-- `RpcWriter` (id counter + stdin)
-- `pending: HashMap<u64, PendingRequest>` — one entry per in-flight request
 - `docs: HashMap<ViewId, DocumentState>`
 - `styles: HashMap<u64, Style>`
-- `event_tx: Sender<Event>`
-- `next_view_request: u64` — sequence counter used only for `new_view` (see §4.1)
+- `pending_updates: HashMap<ViewId, Vec<Update>>` — `update` notifications that arrived before their view was registered (see §4.1).
+- `next_request_id: u64` — reserved for a future `new_view_async`; currently used as the logical id in `Event::ViewOpened`.
+- `width_measure: Option<Arc<WidthMeasureFn>>` — user-installed callback for `measure_width`.
 
 The reader thread and application thread both `lock()` `Inner`. Neither holds the lock across a blocking operation. Concretely:
 
-- `insert(view_id, "x")` → lock, `RpcWriter::notify(...)`, unlock.
+- `insert(view_id, "x")` → `send_rpc_notification("edit", ...)`; no `Inner` lock is held across the write.
 - Reader sees an `update` notification → lock, `DocumentState::apply(update)`, unlock, `event_tx.send(Event::DocumentUpdated{...})`.
 - `document(view_id)` → lock, clone `DocumentState::snapshot(view_id)`, unlock.
 
 > **Gotcha:** `event_tx.send(...)` is done **after unlocking**. That guarantees no deadlock if the UI's event handler calls back into `XiClient::document`, which would try to re-lock `Inner`.
 
-> **Gotcha:** `Inner::pending` is mutated by both threads. `new_view` inserts an entry; the reader thread removes it and dispatches. Since both hold the lock, this is safe.
+> **Gotcha:** `Inner::pending_updates` is written by the reader thread and drained by `new_view` (which runs on the application thread). Both hold the lock when touching it, so this is safe.
 
 ### 3.4 Event delivery
 
-- `XiClient::events(&self) -> &crossbeam_channel::Receiver<Event>`. The `Receiver` lives on `XiClient` directly (not inside `Inner`), so it can be borrowed.
-- **Single consumer.** `crossbeam`'s `Receiver` is not `Clone`. If you need multiple observers, wrap the `Receiver` in your own multiplexer, or have the consumer fan out.
+- `XiClient::events(&self) -> &crossbeam_channel::Receiver<Event>`. The `Receiver` lives on `XiClient` directly, not inside `Inner`, so it can be borrowed.
+- **Single consumer.** `crossbeam`'s `Receiver` is not `Clone` for normal channels. If you need multiple observers, wrap the `Receiver` in your own multiplexer.
 - The channel is **unbounded** (see §10 for the tradeoff).
 - Sends from the reader thread never block on the UI.
 
-> **Gotcha:** the current skeleton in `src/client.rs` returns `Receiver<Event>` by value from a `self.event_rx.clone()`. `crossbeam_channel::Receiver` does **not** implement `Clone` for normal channels. The intended signature is `fn events(&self) -> &Receiver<Event>`. Adjust the skeleton accordingly.
+> **Gotcha:** `Event` is `#[non_exhaustive]`. Downstream `match` arms must include a wildcard branch.
 
 ---
 
@@ -274,29 +274,34 @@ pub struct SpawnOptions {
     pub config_dir: Option<PathBuf>,
     /// Forwarded in `client_started.client_extras_dir`.
     pub client_extras_dir: Option<PathBuf>,
-    /// Level for the `XI_LOG` env var passed to the child (default: unset).
+    /// Value for the `XI_LOG` env var passed to the child.
     pub log_level: Option<String>,
     /// `-log-dir` flag passed to the child.
     pub log_dir: Option<PathBuf>,
     /// `-log-file` flag passed to the child.
     pub log_file: Option<PathBuf>,
-    /// If `true`, pipe stderr instead of inheriting (default: inherit).
+    /// If `true`, pipe stderr and drain it in a background thread instead of
+    /// inheriting the parent's stderr. Bytes are discarded; use `log_dir` /
+    /// `log_file` to inspect.
     pub capture_stderr: bool,
 }
 ```
 
-Steps performed by `spawn`:
+Steps performed by `spawn_with_options`:
 
-1. `XiProcess::spawn(core_path)` — starts the child with `stdin`/`stdout` piped.
-2. Move `ChildStdin` into `RpcWriter`, `ChildStdout` into `RpcReader`.
+1. `XiProcess::spawn_with_options(core_path, &opts)` — starts the child with `stdin`/`stdout` piped, applies env/args from `opts`, and optionally drains stderr in a background thread.
+2. Wrap `ChildStdin` in `SharedStdin`. Keep one clone on `XiClient`; give another clone to `RpcLoop`.
 3. Create `crossbeam_channel::unbounded::<Event>()`. Keep the `Receiver` on `XiClient`; pass a clone of the `Sender` into the reader thread.
-4. Spawn the reader thread named `"xi-client-reader"`.
-5. Lock `Inner`, send `client_started` notification (§4.2), unlock.
-6. Return `XiClient`.
+4. Create `RpcLoop::new(shared_stdin_clone)`, obtain `RpcPeer` via `get_raw_peer().box_clone()`.
+5. Send `client_started` notification (see §4.2) synchronously.
+6. Spawn the reader thread named `"xi-client-reader"`. The thread owns `RpcLoop` and `ChildStdout`.
+7. Return `XiClient`.
+
+**Buffering the race:** between step 5 (`new_view`'s response on the wire) and the app thread's `docs.insert(view_id, ...)`, `xi-core` may already be pushing `update` notifications for the new view. `ClientHandler::on_update` checks `docs.contains_key(view_id)`; if missing, it pushes into `pending_updates[view_id]`. The next `XiClient::new_view` drains that buffer. Without this, the first screen of content would be silently dropped.
 
 > **Gotcha:** `client_started` must be the _first_ message. `XiCore::inner()` panics if it receives anything else (except `tracing_config`) before `client_started`. The SDK always sends it inside `spawn`, so you can't forget.
 
-> **Gotcha:** the child's stderr is inherited by default, so `xi-core`'s log lines go to the parent's stderr. This is convenient for debugging but can be noisy in production; use `SpawnOptions::capture_stderr = true` to pipe it, or set `-log-dir`/`-log-file` to redirect it to a file inside the child.
+> **Gotcha:** the child's stderr is inherited by default. `xi-core`'s log lines go to the parent's stderr — useful for debugging, noisy in production. Use `SpawnOptions::capture_stderr = true` to pipe and discard, or set `-log-dir` / `-log-file` to redirect inside the child.
 
 ### 4.2 Handshake: `client_started`
 
@@ -313,14 +318,14 @@ With `SpawnOptions::config_dir` and/or `client_extras_dir`:
 }
 ```
 
-Effects on `xi-core` (from its own docs):
+Effects on `xi-core`:
 
 - Loads `preferences.xiconfig` / `<lang>.xiconfig` from `config_dir` **if and only if** `config_dir` is provided. Once enabled, RPC cannot modify `general` or `syntax` config domains.
 - Scans `config_dir/plugins/*/manifest.toml` for plugins.
-- Emits `available_languages` and `available_themes` (see §7.10).
+- Emits `available_languages` and `available_themes` (see §7.10, §7.11).
 - Starts plugin processes.
 
-The SDK forwards `available_languages` / `available_themes` as `Event::AvailableLanguages` / `Event::AvailableThemes` (🚧 planned; currently these are consumed silently — see §7).
+The SDK forwards `available_languages` as `Event::AvailableLanguages` and `available_themes` as `Event::AvailableThemes`.
 
 ### 4.3 Graceful shutdown
 
@@ -330,28 +335,19 @@ pub fn shutdown(&self);
 
 Behaviour:
 
-1. Lock `Inner`, `take()` the `RpcWriter`, drop it. Dropping `ChildStdin` closes `xi-core`'s stdin.
-2. Unlock.
-3. `xi-core` sees EOF, exits.
-4. The reader thread sees EOF on stdout, emits `Event::Exited`, and exits.
-5. When the `XiClient` is dropped, `XiProcess::Drop` reaps the child (see §4.4).
+1. `self.stdin.close()` — `SharedStdin` drops the inner `ChildStdin`, sending EOF to `xi-core`.
+2. `xi-core` sees EOF, exits.
+3. The reader thread sees EOF on stdout, sends `Event::Exited`, signals the `wait_for_exit` condvar, and exits.
+4. To _observe_ the exit (and reap the child), call `wait_for_exit(timeout)` (see §6.1).
 
 After `shutdown()`, any subsequent `XiClient` method that writes returns `Error::CoreNotRunning`. `document()` / `events()` keep working until the `XiClient` is dropped.
 
-To observe the actual exit:
-
 ```rust
 client.shutdown();
-loop {
-    match client.events().recv() {
-        Ok(Event::Exited) => break,
-        Ok(_) => {}
-        Err(_) => break,
-    }
-}
+let status = client.wait_for_exit(Duration::from_secs(5))?;
 ```
 
-> **Gotcha:** `shutdown()` is non-blocking; it only closes stdin. The `XiClient` and its reader thread keep running until you drop `XiClient` (or until `Event::Exited` fires and you choose to drop). If you want a synchronous wait, use `client.wait_for_exit(Duration)` (🚧 planned, §10).
+> **Gotcha:** `shutdown()` is non-blocking; it only closes stdin. If you want a synchronous wait, use `wait_for_exit`. Without `wait_for_exit`, the subprocess is reaped by `XiProcess::Drop` when `XiClient` is dropped.
 
 ### 4.4 Unexpected exit
 
@@ -363,9 +359,9 @@ Three ways the child can go away:
 | `xi-core` crashes / is killed             | EOF on stdout           | `Exited`      |
 | Protocol violation by us (malformed JSON) | `xi-core` closes stdout | `Exited`      |
 
-In all three cases the SDK emits **exactly one** `Event::Exited` and the reader thread stops. Any in-flight `PendingRequest` entries are dropped with their oneshot `Sender`s; blocking callers (`new_view`, `get_config`, `cut`, `copy`) get `Error::CoreNotRunning` (see §6.7).
+In all three cases the SDK emits **exactly one** `Event::Exited` and the reader thread stops. Any in-flight requests that `xi-rpc` was blocking on are woken with `Error::PeerDisconnect`, which `lib.rs`'s `From<xi_rpc::Error>` maps to `Error::CoreNotRunning`.
 
-The subprocess is reaped by `XiProcess::Drop`. There is no exit-code available via the public API; 🚧 planned `wait() -> Result<ExitStatus>`.
+The subprocess is reaped by `XiProcess::Drop`, or explicitly by `wait_for_exit`.
 
 ---
 
@@ -373,63 +369,81 @@ The subprocess is reaped by `XiProcess::Drop`. There is no exit-code available v
 
 This is the master table. Details for each SDK method are in §6; details for each event are in §7.
 
+**Legend:** `[done]` shipped · `[planned]` not yet implemented (see §10).
+
 ### 5.1 SDK → core (outbound)
 
-| SDK method                                                                                                                                         | Raw method                                      | Type  | Notes                              |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ----- | ---------------------------------- | ----- |
-| `XiClient::spawn`                                                                                                                                  | `client_started`                                | notif | sent during spawn                  |
-| `new_view` / `new_view_async`                                                                                                                      | `new_view`                                      | req   | returns `view_id`                  |
-| `close_view`                                                                                                                                       | `close_view`                                    | notif |                                    |
-| `save`                                                                                                                                             | `save`                                          | notif | errors come back as `alert`        |
-| `insert`, `paste`, `delete_*`, `insert_newline`, `insert_tab`, `undo`, `redo`, `transpose`, `duplicate_line`, `increase_number`, `decrease_number` | `edit` + inner `insert`/`paste`/…               | notif | see §6.2                           |
-| `move_*`, `scroll_page_*`, `select_all`, `collapse_selections`, `add_selection_above/below`, `selection_into_lines`                                | `edit` + inner `move_*`/…                       | notif |                                    |
-| `uppercase`, `lowercase`, `capitalize`, `indent`, `outdent`, `reindent`                                                                            | `edit` + inner transform                        | notif |                                    |
-| `scroll`                                                                                                                                           | `edit` + `scroll [first,last]`                  | notif | formatted lines                    |
-| `resize`                                                                                                                                           | `edit` + `resize {w,h}`                         | notif | px/points                          |
-| `request_lines`                                                                                                                                    | `edit` + `request_lines [first,last]`           | notif |                                    |
-| `goto_line`                                                                                                                                        | `edit` + `goto_line {line}`                     | notif |                                    |
-| `gesture`                                                                                                                                          | `edit` + `gesture {line,col,ty}`                | notif |                                    |
-| `find`, `multi_find`, `find_next`, `find_previous`, `find_all`, `highlight_find`, `selection_for_find`                                             | `edit` + inner                                  | notif |                                    |
-| `replace`, `replace_next`, `replace_all`, `selection_for_replace`                                                                                  | `edit` + inner                                  | notif |                                    |
-| `request_hover`                                                                                                                                    | `edit` + `request_hover {request_id,position?}` | notif | result comes back via `show_hover` |
-| `get_config`                                                                                                                                       | `get_config`                                    | req   |                                    |
-| `cut` / `copy`                                                                                                                                     | `edit` + inner `cut`/`copy`                     | req   | returns `String                    | null` |
-| `debug_get_contents`                                                                                                                               | `debug_get_contents`                            | req   |                                    |
-| `set_theme`                                                                                                                                        | `set_theme`                                     | notif |                                    |
-| `set_language`                                                                                                                                     | `set_language`                                  | notif | requires syntect plugin            |
-| `modify_user_config`                                                                                                                               | `modify_user_config`                            | notif |                                    |
-| `plugin_start`, `plugin_stop`, `plugin_rpc`                                                                                                        | `plugin` + inner                                | notif |                                    |
+| SDK method                                                        | Raw method                                | Type  | Status      |
+| ----------------------------------------------------------------- | ----------------------------------------- | ----- | ----------- |
+| `spawn` / `spawn_with_options`                                    | `client_started`                          | notif | `[done]`    |
+| `new_view`                                                        | `new_view`                                | req   | `[done]`    |
+| `new_view_async`                                                  | `new_view`                                | req   | `[planned]` |
+| `close_view`                                                      | `close_view`                              | notif | `[done]`    |
+| `save`                                                            | `save`                                    | notif | `[done]`    |
+| `insert`                                                          | `edit.insert`                             | notif | `[done]`    |
+| `insert_newline` / `insert_tab`                                   | `edit.*`                                  | notif | `[done]`    |
+| `delete_backward` / `delete_forward`                              | `edit.*`                                  | notif | `[done]`    |
+| `delete_word_backward` / `delete_word_forward`                    | `edit.*`                                  | notif | `[done]`    |
+| `undo` / `redo`                                                   | `edit.*`                                  | notif | `[done]`    |
+| `transpose` / `duplicate_line`                                    | `edit.*`                                  | notif | `[done]`    |
+| `uppercase` / `lowercase` / `capitalize`                          | `edit.*`                                  | notif | `[done]`    |
+| `indent` / `outdent` / `reindent`                                 | `edit.*`                                  | notif | `[done]`    |
+| `move_up` / `down` / `left` / `right`                             | `edit.*`                                  | notif | `[done]`    |
+| `move_*_and_modify_selection` (4)                                 | `edit.*`                                  | notif | `[done]`    |
+| `move_word_*`, `move_to_*`, `scroll_page_*` (+ variants)          | `edit.*`                                  | notif | `[planned]` |
+| `select_all` / `collapse_selections`                              | `edit.*`                                  | notif | `[done]`    |
+| `add_selection_above` / `below`, `selection_into_lines`           | `edit.*`                                  | notif | `[planned]` |
+| `paste`                                                           | `edit.paste`                              | notif | `[planned]` |
+| `goto_line`                                                       | `edit.goto_line`                          | notif | `[planned]` |
+| `delete_to_end_of_paragraph`, `delete_to_beginning_of_line`       | `edit.*`                                  | notif | `[planned]` |
+| `increase_number` / `decrease_number`                             | `edit.*`                                  | notif | `[planned]` |
+| `scroll`                                                          | `edit.scroll [first,last]`                | notif | `[done]`    |
+| `resize`                                                          | `edit.resize {width,height}`              | notif | `[done]`    |
+| `request_lines`                                                   | `edit.request_lines [first,last]`         | notif | `[done]`    |
+| `gesture`                                                         | `edit.gesture`                            | notif | `[done]`    |
+| `find`, `multi_find`, `find_next`, `find_previous`, `find_all`    | `edit.*`                                  | notif | `[done]`    |
+| `highlight_find`, `selection_for_find`                            | `edit.*`                                  | notif | `[done]`    |
+| `replace`, `replace_next`, `replace_all`, `selection_for_replace` | `edit.*`                                  | notif | `[done]`    |
+| `request_hover`                                                   | `edit.request_hover`                      | notif | `[done]`    |
+| `get_config`                                                      | `get_config`                              | req   | `[done]`    |
+| `cut` / `copy`                                                    | `edit.cut` / `edit.copy`                  | req   | `[done]`    |
+| `debug_get_contents`                                              | `debug_get_contents`                      | req   | `[planned]` |
+| `set_theme`                                                       | `set_theme`                               | notif | `[done]`    |
+| `set_language`                                                    | `set_language`                            | notif | `[done]`    |
+| `modify_user_config`                                              | `modify_user_config`                      | notif | `[done]`    |
+| `plugin_start`                                                    | `plugin` + `{command: "start", ...}`      | notif | `[done]`    |
+| `plugin_stop`                                                     | `plugin` + `{command: "stop", ...}`       | notif | `[done]`    |
+| `plugin_rpc`                                                      | `plugin` + `{command: "plugin_rpc", ...}` | notif | `[done]`    |
 
 ### 5.2 Core → SDK (inbound)
 
-| Raw notification                     | SDK handler                        | Event                   |
-| ------------------------------------ | ---------------------------------- | ----------------------- |
-| `update`                             | apply ops to `DocumentState`       | `DocumentUpdated`       |
-| `scroll_to`                          | —                                  | `ScrollTo`              |
-| `def_style`                          | insert into `styles` map           | `StyleDefined`          |
-| `theme_changed`                      | —                                  | `ThemeChanged`          |
-| `config_changed`                     | merge into `DocumentState::config` | `ConfigChanged`         |
-| `language_changed`                   | set `DocumentState::language`      | `LanguageChanged`       |
-| `available_languages`                | —                                  | `AvailableLanguages` 🚧 |
-| `available_themes`                   | —                                  | `AvailableThemes` 🚧    |
-| `find_status`                        | parse matches count                | `FindStatus`            |
-| `replace_status`                     | —                                  | `ReplaceStatus` 🚧      |
-| `show_hover`                         | correlate with `request_hover`     | `HoverShown` 🚧         |
-| `alert`                              | —                                  | `Alert`                 |
-| `available_plugins`                  | —                                  | `AvailablePlugins` 🚧   |
-| `plugin_started`                     | —                                  | `PluginStarted` 🚧      |
-| `plugin_stopped`                     | —                                  | `PluginStopped` 🚧      |
-| `update_cmds`                        | —                                  | `PluginCommands` 🚧     |
-| `add_status_item`                    | —                                  | `StatusItemAdded` 🚧    |
-| `update_status_item`                 | —                                  | `StatusItemUpdated` 🚧  |
-| `remove_status_item`                 | —                                  | `StatusItemRemoved` 🚧  |
-| _(response to `new_view`)_           | create `DocumentState`             | `ViewOpened`            |
-| _(response to `get_config`)_         | —                                  | `ConfigResponse` 🚧     |
-| _(response to `cut`)_                | —                                  | `CutResult` 🚧          |
-| _(response to `copy`)_               | —                                  | `CopyResult` 🚧         |
-| _(response to `debug_get_contents`)_ | —                                  | `DocumentContents` 🚧   |
-| _(request `measure_width`)_          | **auto-reply**                     | _(none, see §9.1)_      |
-| _(EOF on stdout)_                    | —                                  | `Exited`                |
+| Raw notification                     | SDK handler                                | Event                      | Status      |
+| ------------------------------------ | ------------------------------------------ | -------------------------- | ----------- |
+| `update`                             | apply ops (or buffer in `pending_updates`) | `DocumentUpdated`          | `[done]`    |
+| `scroll_to`                          | —                                          | `ScrollTo`                 | `[done]`    |
+| `def_style`                          | insert into `styles` map                   | `StyleDefined`             | `[done]`    |
+| `theme_changed`                      | —                                          | `ThemeChanged` (name only) | `[done]`    |
+| `config_changed`                     | merge into `DocumentState::config`         | `ConfigChanged`            | `[done]`    |
+| `language_changed`                   | set `DocumentState::language`              | `LanguageChanged`          | `[done]`    |
+| `available_languages`                | —                                          | `AvailableLanguages`       | `[done]`    |
+| `available_themes`                   | —                                          | `AvailableThemes`          | `[done]`    |
+| `find_status`                        | sum `queries[i].matches`                   | `FindStatus`               | `[done]`    |
+| `replace_status`                     | parse `status.{chars,preserve_case}`       | `ReplaceStatus`            | `[done]`    |
+| `show_hover`                         | correlate with `request_hover`             | `HoverShown`               | `[done]`    |
+| `alert`                              | —                                          | `Alert`                    | `[done]`    |
+| `available_plugins`                  | —                                          | `AvailablePlugins`         | `[done]`    |
+| `plugin_started`                     | —                                          | `PluginStarted`            | `[done]`    |
+| `plugin_stopped`                     | —                                          | `PluginStopped`            | `[done]`    |
+| `update_cmds`                        | —                                          | `PluginCommands`           | `[done]`    |
+| `add_status_item`                    | —                                          | `StatusItemAdded`          | `[done]`    |
+| `update_status_item`                 | —                                          | `StatusItemUpdated`        | `[done]`    |
+| `remove_status_item`                 | —                                          | `StatusItemRemoved`        | `[done]`    |
+| _(response to `new_view`)_           | create `DocumentState`                     | `ViewOpened`               | `[done]`    |
+| _(response to `get_config`)_         | —                                          | `ConfigResponse`           | `[planned]` |
+| _(response to `cut`/`copy`)_         | —                                          | `CutResult` / `CopyResult` | `[planned]` |
+| _(response to `debug_get_contents`)_ | —                                          | `DocumentContents`         | `[planned]` |
+| _(request `measure_width`)_          | **auto-reply**                             | _(none, see §9.1)_         | `[done]`    |
+| _(EOF on stdout)_                    | —                                          | `Exited`                   | `[done]`    |
 
 ---
 
@@ -444,31 +458,32 @@ Every method below is called on `&XiClient`. `ViewId` is a copyable `usize`-back
 | `Result<()>`                                | the notification was written to `xi-core`'s stdin.                                        |
 | `Result<T>` where `T: Copy` (e.g. `ViewId`) | a synchronous request/response completed.                                                 |
 | `Result<Option<String>>`                    | a synchronous request/response that can produce `None` (e.g. `cut` with empty selection). |
-| `Result<u64>` (e.g. `new_view_async`)       | the ID of an outstanding request. The result will arrive as an `Event`.                   |
+| `Result<u64>` (future `new_view_async`)     | the ID of an outstanding request. The result will arrive as an `Event`.                   |
 
 ### 6.1 Lifecycle
 
-#### `XiClient::spawn` / `spawn_with_options`
-
-```rust
-pub fn spawn(core_path: impl AsRef<Path>) -> Result<Self>;
-pub fn spawn_with_options(core_path: impl AsRef<Path>, opts: SpawnOptions) -> Result<Self>;
-```
+#### `spawn` / `spawn_with_options`
 
 - Raw: `client_started`.
 - Returns once the subprocess is running and `client_started` has been written.
-- 🚧 `spawn_with_options` is planned; `spawn` sends `client_started` with empty params.
 - Errors: `Error::Spawn` if the process can't be started; `Error::Io` if writing `client_started` fails.
 
 #### `shutdown`
 
-```rust
-pub fn shutdown(&self);
-```
-
 - Raw: none (closes stdin).
 - See §4.3.
 - After this call, all subsequent write attempts return `Error::CoreNotRunning`.
+
+#### `wait_for_exit`
+
+```rust
+pub fn wait_for_exit(&self, timeout: Duration) -> Result<std::process::ExitStatus>;
+```
+
+- Waits for the reader thread to observe EOF, then reaps the child and caches the exit status.
+- Idempotent: subsequent calls return the cached status.
+- Returns `Err(Error::Rpc("timeout ..."))` if the child hasn't exited within `timeout`.
+- Does **not** initiate shutdown. Call `shutdown()` first if you want the child to exit.
 
 #### `events`
 
@@ -476,57 +491,70 @@ pub fn shutdown(&self);
 pub fn events(&self) -> &crossbeam_channel::Receiver<Event>;
 ```
 
-- See §3.4.
-- **Borrow**, not owned.
+- Borrow, not owned. Single consumer.
 
 ### 6.2 Namespaced `edit` calls
 
-All editing/movement/selection/viewport/gesture calls share this wire shape:
+All editing/movement/selection/viewport/gesture/find calls share this wire shape:
 
 ```json
-{"method":"edit","params":{"view_id":"view-id-N","method":"<inner>","params":<inner_params>}}
+{"method": "edit", "params": {"view_id": "view-id-N", "method": "<inner>", "params": <inner_params>}}
 ```
 
 Inner params that are "empty" are sent as `[]` (an empty array). `xi-core`'s `EditCommand` deserializer accepts `params` omitted, `{}`, or `[]` interchangeably.
 
-The SDK exposes a helper for every inner method. In the tables below, "raw" is `edit.<inner>`.
+In the tables below, "inner" is the `method` field inside `edit`'s params.
 
-#### 6.2.1 Edits (fire-and-forget)
+#### 6.2.1 Edits
 
-| SDK method                             | inner                         | inner params       | Notes                                                                                                                  |
-| -------------------------------------- | ----------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `insert(view_id, chars)`               | `insert`                      | `{"chars": chars}` | inserts at every cursor                                                                                                |
-| `paste(view_id, chars)`                | `paste`                       | `{"chars": chars}` | multi-cursor paste semantics: one line per cursor if line-count matches cursor-count, else full string at every cursor |
-| `delete_backward(view_id)`             | `delete_backward`             | `[]`               |                                                                                                                        |
-| `delete_forward(view_id)`              | `delete_forward`              | `[]`               |                                                                                                                        |
-| `delete_word_backward(view_id)`        | `delete_word_backward`        | `[]`               |                                                                                                                        |
-| `delete_word_forward(view_id)`         | `delete_word_forward`         | `[]`               |                                                                                                                        |
-| `delete_to_end_of_paragraph(view_id)`  | `delete_to_end_of_paragraph`  | `[]`               |                                                                                                                        |
-| `delete_to_beginning_of_line(view_id)` | `delete_to_beginning_of_line` | `[]`               |                                                                                                                        |
-| `insert_newline(view_id)`              | `insert_newline`              | `[]`               |                                                                                                                        |
-| `insert_tab(view_id)`                  | `insert_tab`                  | `[]`               |                                                                                                                        |
-| `undo(view_id)`                        | `undo`                        | `[]`               |                                                                                                                        |
-| `redo(view_id)`                        | `redo`                        | `[]`               |                                                                                                                        |
-| `transpose(view_id)`                   | `transpose`                   | `[]`               |                                                                                                                        |
-| `duplicate_line(view_id)`              | `duplicate_line`              | `[]`               |                                                                                                                        |
-| `increase_number(view_id)`             | `increase_number`             | `[]`               |                                                                                                                        |
-| `decrease_number(view_id)`             | `decrease_number`             | `[]`               |                                                                                                                        |
+**Shipped:**
+
+| SDK method                      | inner                  | inner params       | Notes                   |
+| ------------------------------- | ---------------------- | ------------------ | ----------------------- |
+| `insert(view_id, chars)`        | `insert`               | `{"chars": chars}` | inserts at every cursor |
+| `delete_backward(view_id)`      | `delete_backward`      | `[]`               |                         |
+| `delete_forward(view_id)`       | `delete_forward`       | `[]`               |                         |
+| `delete_word_backward(view_id)` | `delete_word_backward` | `[]`               |                         |
+| `delete_word_forward(view_id)`  | `delete_word_forward`  | `[]`               |                         |
+| `insert_newline(view_id)`       | `insert_newline`       | `[]`               |                         |
+| `insert_tab(view_id)`           | `insert_tab`           | `[]`               |                         |
+| `undo(view_id)`                 | `undo`                 | `[]`               |                         |
+| `redo(view_id)`                 | `redo`                 | `[]`               |                         |
+| `transpose(view_id)`            | `transpose`            | `[]`               |                         |
+| `duplicate_line(view_id)`       | `duplicate_line`       | `[]`               |                         |
+
+**Not yet** (Phase 6):
+
+| SDK method                               | inner                         | Why deferred                                                                                                                                       |
+| ---------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paste(view_id, chars)`                  | `paste`                       | multi-cursor semantics: one line per cursor if `lines.len() == cursors.len()`, else full string at every cursor. Needs a dedicated lifecycle test. |
+| `goto_line(view_id, line)`               | `goto_line {line}`            | Triggers `scroll_to`; separate event semantics.                                                                                                    |
+| `delete_to_end_of_paragraph`             | `delete_to_end_of_paragraph`  |                                                                                                                                                    |
+| `delete_to_beginning_of_line`            | `delete_to_beginning_of_line` |                                                                                                                                                    |
+| `increase_number` / `decrease_number`    | same                          |                                                                                                                                                    |
+| `uppercase` / `lowercase` / `capitalize` | same                          | `[done]` actually shipped, just listed here for completeness in §6.2.3                                                                             |
 
 #### 6.2.2 Movement / selection
 
-Every `move_*` variant has a `move_*_and_modify_selection` companion; the SDK exposes both. They all take `[]` as params.
+**Shipped:**
 
-`move_up`, `move_down`, `move_left`, `move_right`, `move_word_left`, `move_word_right`, `move_to_beginning_of_paragraph`, `move_to_end_of_paragraph`, `move_to_left_end_of_line`, `move_to_right_end_of_line`, `move_to_beginning_of_document`, `move_to_end_of_document`, `scroll_page_up`, `scroll_page_down` — and their `_and_modify_selection` variants.
+- `move_up`, `move_down`, `move_left`, `move_right`
+- `move_up_and_modify_selection`, `move_down_and_modify_selection`,
+  `move_left_and_modify_selection`, `move_right_and_modify_selection`
+- `select_all`, `collapse_selections`
 
-Plus:
+All take `[]` as params.
 
-| SDK method                      | inner                  | inner params |
-| ------------------------------- | ---------------------- | ------------ |
-| `select_all(view_id)`           | `select_all`           | `[]`         |
-| `collapse_selections(view_id)`  | `collapse_selections`  | `[]`         |
-| `add_selection_above(view_id)`  | `add_selection_above`  | `[]`         |
-| `add_selection_below(view_id)`  | `add_selection_below`  | `[]`         |
-| `selection_into_lines(view_id)` | `selection_into_lines` | `[]`         |
+**Not yet** (Phase 6):
+
+- `move_word_left` / `move_word_right` (+ `_and_modify_selection`)
+- `move_to_left_end_of_line` / `move_to_right_end_of_line` (+ `_and_modify_selection`)
+- `move_to_beginning_of_document` / `move_to_end_of_document` (+ `_and_modify_selection`)
+- `move_to_beginning_of_paragraph` / `move_to_end_of_paragraph` (+ `_and_modify_selection`)
+- `scroll_page_up` / `scroll_page_down` (+ `_and_modify_selection`)
+- `add_selection_above` / `add_selection_below` / `selection_into_lines`
+
+These are all one-liners of the form `self.send_edit(view_id, "<inner>", json!([]))`. See §10.
 
 #### 6.2.3 Text transforms
 
@@ -543,16 +571,16 @@ Plus:
 
 #### 6.2.4 Viewport
 
-| SDK method                            | inner           | inner params                         |
-| ------------------------------------- | --------------- | ------------------------------------ |
-| `scroll(view_id, first, last)`        | `scroll`        | `[first, last]`                      |
-| `resize(view_id, width, height)`      | `resize`        | `{"width": width, "height": height}` |
-| `request_lines(view_id, first, last)` | `request_lines` | `[first, last]`                      |
-| `goto_line(view_id, line)`            | `goto_line`     | `{"line": line}`                     |
+| SDK method                            | inner           | inner params                         | Notes                      |
+| ------------------------------------- | --------------- | ------------------------------------ | -------------------------- |
+| `scroll(view_id, first, last)`        | `scroll`        | `[first, last]`                      | formatted lines, half-open |
+| `resize(view_id, width, height)`      | `resize`        | `{"width": width, "height": height}` | px/points                  |
+| `request_lines(view_id, first, last)` | `request_lines` | `[first, last]`                      |                            |
 
-- `scroll` uses **formatted** (soft-wrapped) lines, half-open `[first, last)`. Report it every time the viewport changes; `xi-core` uses it to decide which lines to render and keep valid.
+- `scroll` uses **formatted** (soft-wrapped) lines, half-open `[first, last)`. Report it every time the viewport changes.
 - `resize` takes **px/points**, not device pixels.
-- `request_lines` asks for lines outside the viewport to be made valid.
+- `request_lines` asks xi-core to make lines outside the viewport valid, sending `update` for any that are currently invalid. Call after `scroll` when entering unloaded territory.
+- **Not yet:** `goto_line`. See §10.
 
 #### 6.2.5 Gestures
 
@@ -597,7 +625,7 @@ pub enum ModifySelection { None, Set, Add, AddRemovingCurrent }
 | SDK method                                    | inner                   | inner params                                     |
 | --------------------------------------------- | ----------------------- | ------------------------------------------------ |
 | `find(view_id, q: FindQuery)`                 | `find`                  | `{chars, case_sensitive, regex?, whole_words?}`  |
-| `multi_find(view_id, qs: Vec<FindQuery>)`     | `multi_find`            | `{queries: [...]}`                               |
+| `multi_find(view_id, qs: &[FindQuery])`       | `multi_find`            | `{queries: [...]}`                               |
 | `find_next(view_id, opts)`                    | `find_next`             | `{wrap_around?, allow_same?, modify_selection?}` |
 | `find_previous(view_id, opts)`                | `find_previous`         | same                                             |
 | `find_all(view_id)`                           | `find_all`              | `[]`                                             |
@@ -610,15 +638,24 @@ pub enum ModifySelection { None, Set, Add, AddRemovingCurrent }
 
 Results arrive asynchronously:
 
-- `Event::FindStatus { view_id, matches }` fires as matches are found.
+- `Event::FindStatus { view_id, matches }` fires as matches are found. **Important:** on the wire, `matches` is per-query inside a `queries` array:
+
+  ```json
+  {"view_id": "view-id-1", "queries": [{"matches": 3, "id": 1, ...}, ...]}
+  ```
+
+  The SDK **sums** `queries[i].matches` into a single `matches` value for the event. Per-query details (chars, case_sensitivity, per-match line numbers) are currently dropped (see §10).
+
 - `Event::ReplaceStatus { view_id, chars, preserve_case }` fires when the replacement string changes.
 
-> **Gotcha:** `find_status` may be sent in two flavours (per `xi-core`'s internal `FindStatusChange`): `All` (full query list, expensive) and `Matches` (match count only). The SDK surfaces only `matches` in `Event::FindStatus` for now; the full query list will be added when we need to display it (§10).
+> **Gotcha:** `find` runs incrementally from the visible range. If you call `find` right after `new_view` without `resize`/`scroll`, `xi-core` may report `matches: 0` and never find anything — the viewport has no size. Always `resize` + `scroll` before searching.
+
+> **Gotcha:** `replace_all` uses the currently-set replacement string. Call `replace(view_id, chars)` before `replace_all`, or nothing gets replaced.
 
 #### 6.2.7 Hover
 
 ```rust
-pub struct Position { pub line: u64, pub column: u64 }
+pub struct Position { pub line: u64, pub col: u64 }
 
 pub fn request_hover(
     &self,
@@ -628,35 +665,32 @@ pub fn request_hover(
 ) -> Result<()>;
 ```
 
-Raw: `edit.request_hover {request_id, position?}`.
+Raw: `edit.request_hover {request_id, position?}`, where `position` serializes as `{"line": N, "col": M}`.
 
 `request_id` is an **opaque** id chosen by the caller. It is echoed in `Event::HoverShown { view_id, request_id, result }`. It is _not_ the RPC `id` and is not consumed by the SDK.
 
 `position` columns are **UTF-8 byte offsets within the line**, matching `cursor` and `Line.styles` (§8.4, §8.5). Omit `position` to use the current cursor.
 
-> **Gotcha:** column units. `request_hover` and `goto_line` accept columns as UTF-8 byte offsets. If your UI tracks UTF-16 or grapheme indices, you must convert.
+> **Gotcha:** column units. `request_hover` and (the future) `goto_line` accept columns as UTF-8 byte offsets. If your UI tracks UTF-16 or grapheme indices, you must convert.
+
+> **Gotcha:** Without an LSP plugin, `xi-core` may emit `HoverShown { result: None }` or nothing at all. The SDK treats both as valid. Phase 5 lifecycle test is a smoke test only; a real round-trip requires an LSP plugin.
 
 ### 6.3 View lifecycle
 
-#### `new_view` / `new_view_async`
+#### `new_view`
 
 ```rust
-pub fn new_view(&self, path: Option<PathBuf>) -> Result<ViewId>;      // blocking
-pub fn new_view_async(&self, path: Option<PathBuf>) -> Result<u64>;  // non-blocking, returns request_id
+pub fn new_view(&self, path: Option<PathBuf>) -> Result<ViewId>;
 ```
 
-Raw: `new_view { file_path? }` request.
+Raw: `new_view {file_path?}` request.
 
-- `new_view` (blocking): sends the request, then waits on a per-request oneshot channel for the response. Returns the `ViewId`. `Event::ViewOpened { request_id, view_id }` is still emitted for observers that prefer the event.
-- `new_view_async`: sends the request, returns the request id immediately. The caller must `await` `Event::ViewOpened { request_id, .. }` and match on `request_id`.
-- Both create a `DocumentState` for the returned `ViewId` before returning / emitting.
-- Path `None` → empty buffer.
-- The same path cannot have two views simultaneously (`xi-core` restriction).
-- On open error: `new_view` returns `Err(Error::Rpc(..))` (mapped from `error.code = 5/6/7`).
+- **Blocking** synchronous RPC round-trip.
+- Emits `Event::ViewOpened { request_id, view_id }` (where `request_id` is the SDK-allocated `next_request_id` from `Inner`).
+- Also emits a `DocumentUpdated` if updates were buffered in `pending_updates` (see §4.1).
+- On open error: `Error::Remote(RemoteError::Custom { code, .. })` (mapped from `code = 5/6/7`).
 
-> **Gotcha:** with `new_view_async`, if multiple `new_view` calls are in flight, you must correlate by `request_id` from `Event::ViewOpened`. Do not assume `view_id == request_id` — `xi-core` allocates view ids independently of request ids.
-
-> **Gotcha:** in the current skeleton, `client.rs` returns `Result<u64>` from `new_view`. The **recommended** signature is `Result<ViewId>` for the blocking variant and `Result<u64>` for `new_view_async`. The example in `examples/basic.rs` uses the return value only as an opaque token (`_req`), so both signatures compile.
+> **Not yet:** `new_view_async` (Phase 8). Blocking is awkward inside a `winit` / `egui` event loop. Until it ships, offload `new_view` to a worker thread.
 
 #### `close_view`
 
@@ -666,7 +700,7 @@ pub fn close_view(&self, view_id: ViewId) -> Result<()>;
 
 Raw: `close_view {view_id}` notification.
 
-- Drops the SDK's `DocumentState`. Emits `Event::ViewClosed { view_id }` (🚧 planned; core sends nothing for it).
+- Drops the SDK's `DocumentState`. Emits `Event::ViewClosed { view_id }` iff the view existed.
 - Idempotent (further calls are no-ops).
 
 #### `save`
@@ -696,7 +730,7 @@ Reads `Inner::docs[view_id]`, clones the snapshot. `None` if the view is unknown
 pub fn view_ids(&self) -> Vec<ViewId>;
 ```
 
-Returns the currently-known view ids.
+Returns the currently-known view ids, ascending.
 
 ### 6.4 Config
 
@@ -708,9 +742,9 @@ pub fn get_config(&self, view_id: ViewId) -> Result<Config>;
 
 Raw: `get_config {view_id}` request.
 
-- Blocking. On the wire, the response is the merged config object (see `types::Config`).
+- **Blocking** synchronous round-trip.
+- Response is the merged config object (see `types::Config`).
 - On `xi-core` side, missing `view_id` → `error.code = 404`.
-- `Event::ConfigResponse { request_id, view_id, config }` (🚧 planned) is emitted alongside.
 
 > **Gotcha:** you usually don't need `get_config` — `xi-core` pushes the **full** config as the first `config_changed` for each new view, and only diffs after that. `get_config` is useful for tests and for re-fetching after reconnect.
 
@@ -719,8 +753,8 @@ Raw: `get_config {view_id}` request.
 ```rust
 pub enum ConfigDomain {
     General,
-    Syntax { language: String },
-    UserOverride { view_id: ViewId },
+    Syntax(String),
+    UserOverride(ViewId),
 }
 
 pub fn modify_user_config(&self, domain: ConfigDomain, changes: serde_json::Value) -> Result<()>;
@@ -742,7 +776,7 @@ pub fn set_theme(&self, name: &str) -> Result<()>;
 
 Raw: `set_theme {theme_name}` notification.
 
-- On success, `Event::ThemeChanged { name }` fires (payload is only the theme _name_, not the full `ThemeSettings`; the SDK drops the payload — see §10).
+- On success, `Event::ThemeChanged { name }` fires. The `ThemeSettings` payload (foreground, background, caret colors, …) is currently **dropped** — only the name is surfaced. See §10.
 - Names come from `Event::AvailableThemes`.
 
 #### `set_language`
@@ -753,24 +787,21 @@ pub fn set_language(&self, view_id: ViewId, language: &str) -> Result<()>;
 
 Raw: `set_language {view_id, language_id}` notification.
 
-- Requires the syntect plugin to actually do anything; without it, this is a no-op at the syntax-highlighting level, but `Event::LanguageChanged` still fires (from `language_changed`).
+- Requires the syntect plugin to actually do anything; without it, no-op at the syntax-highlighting level, but `Event::LanguageChanged` still fires (from `language_changed`).
 - On wire, the field is `view_id` (**not** `view-id`), despite what some upstream docs say.
 
 ### 6.6 Sync requests
 
-These return through a per-request oneshot channel and are only meaningful while the reader thread is alive.
-
 ```rust
 pub fn cut(&self, view_id: ViewId) -> Result<Option<String>>;
 pub fn copy(&self, view_id: ViewId) -> Result<Option<String>>;
-pub fn debug_get_contents(&self, view_id: ViewId) -> Result<String>;
 ```
 
-- Raw: `edit.cut` / `edit.copy` (with `[]` params) and `debug_get_contents {view_id}` respectively.
-- `cut` / `copy` return `None` if the selection is empty.
-- `debug_get_contents` returns the full buffer text; the request is cheap but not free on large documents.
+- Raw: `edit.cut` / `edit.copy` (with `[]` params).
+- Return `None` if the selection is empty.
+- **Blocking.** Same recommendation as `new_view`: offload to a worker thread in a synchronous UI loop.
 
-> **Gotcha:** if `xi-core` dies while one of these is outstanding, the caller wakes with `Error::CoreNotRunning` (the pending oneshot `Sender` is dropped). The SDK does not retry.
+> **Not yet:** `debug_get_contents`. See §10.
 
 ### 6.7 Plugin control
 
@@ -780,21 +811,29 @@ pub fn plugin_stop(&self, view_id: ViewId, plugin: &str) -> Result<()>;
 pub fn plugin_rpc(&self, view_id: ViewId, receiver: &str, rpc: serde_json::Value) -> Result<()>;
 ```
 
-Raw: `plugin.{start|stop|plugin_rpc}` notifications.
+Raw: all three use the **`plugin` namespace**, but with **`command`**, not `method`:
 
-- `plugin_rpc` sends a custom notification to the named plugin. The `rpc` object must contain `"method"` and `"params"`; it's the payload of a plugin-RPC notification.
-- Notifications from the plugin back to the UI go through `Event::PluginCommands` / `Event::StatusItem*` / `Event::HoverShown` / `Event::Alert` (🚧 planned).
+```json
+{"method": "plugin", "params": {"command": "start",       "view_id": "view-id-1", "plugin_name": "syntect"}}
+{"method": "plugin", "params": {"command": "stop",        "view_id": "view-id-1", "plugin_name": "syntect"}}
+{"method": "plugin", "params": {"command": "plugin_rpc",  "view_id": "view-id-1", "receiver": "syntect", "rpc": {"method": "...", "params": {...}}}}
+```
+
+> **Gotcha:** the `plugin` namespace uses `"command"`, while `edit` uses `"method"`. Sending `"method"` for a plugin notification will cause `xi-core` to exit with `UnknownRequest("missing field command")`. This is a protocol quirk of `xi-core`; the SDK always emits `command`.
+
+- `plugin_rpc` sends a custom notification to the named plugin. The `rpc` object must contain `"method"` and `"params"` — that's the plugin-RPC payload, nested inside our outer `plugin` message.
+- Notifications from the plugin back to the UI go through `Event::PluginCommands`, `Event::StatusItem*`, `Event::HoverShown`, `Event::Alert`.
 
 ---
 
 ## 7. Events reference
 
-All events are emitted on the `crossbeam_channel::Receiver<Event>` returned by `events()`. Unless noted otherwise, an event can be emitted zero, one, or many times.
+All events are emitted on the `crossbeam_channel::Receiver<Event>` returned by `events()`. Unless noted otherwise, an event can be emitted zero, one, or many times. `Event` is `#[non_exhaustive]`.
 
 ### 7.1 `Event::ViewOpened { request_id: u64, view_id: ViewId }`
 
 - Fires when `xi-core` responds to `new_view`.
-- `request_id` matches what `new_view_async` returned (or what the SDK allocated internally for blocking `new_view`).
+- `request_id` is the SDK-allocated logical id from `Inner::next_request_id`. Reserved for a future `new_view_async`; today the caller can ignore it.
 - Emitted **once** per view.
 - After this event, `document(view_id)` returns `Some(snapshot)` with a default (empty) document; the first real content arrives with `DocumentUpdated`.
 
@@ -805,7 +844,7 @@ All events are emitted on the `crossbeam_channel::Receiver<Event>` returned by `
 - Read the current state with `document(view_id)`.
 - There is no payload beyond `view_id` — deliberate; the snapshot can be large, and pull-on-demand lets the UI coalesce multiple events.
 
-> **Gotcha:** because `document()` re-locks, if `xi-core` pushes a second `update` between your `recv()` and `document()`, you'll see the newer state. That's fine for rendering but means "one event ≠ one snapshot version". If you need strict per-event snapshots, use a `DocumentUpdated` variant that carries the snapshot (see §10).
+> **Gotcha:** because `document()` re-locks, if `xi-core` pushes a second `update` between your `recv()` and `document()`, you'll see the newer state. That's fine for rendering but means "one event ≠ one snapshot version". If you need strict per-event snapshots, add a `DocumentUpdatedWithSnapshot` variant (see §10).
 
 ### 7.3 `Event::StyleDefined(Style)`
 
@@ -827,6 +866,8 @@ All events are emitted on the `crossbeam_channel::Receiver<Event>` returned by `
 
 > **Gotcha:** the SDK merges into state **before** emitting. `document()` right after the event shows the new config.
 
+> **Gotcha:** `changes` is a typed `Config`. Any keys not modeled by `Config` (e.g. `scroll_past_end` from newer builds) are merged into state via `Config::merge` (best-effort, they're ignored too) but never surface on the event payload. See §10.
+
 ### 7.6 `Event::LanguageChanged { view_id: ViewId, language: String }`
 
 - Fires on `language_changed`.
@@ -835,49 +876,97 @@ All events are emitted on the `crossbeam_channel::Receiver<Event>` returned by `
 ### 7.7 `Event::FindStatus { view_id: ViewId, matches: u64 }`
 
 - Fires on `find_status`.
-- `matches` is the number of matches known **so far** — `xi-core` runs find incrementally, so this grows over time until the search reaches EOF.
-- Does not include per-match line numbers; see §10.
+- `matches` is the **sum** of `queries[i].matches` from the wire. The per-query details are currently dropped. See §10.
+- `xi-core` runs find incrementally, so this grows over time until the search reaches EOF.
+- **Requires a viewport:** find runs from the visible range. If you haven't called `resize` + `scroll`, `matches` may stay at 0.
 
-### 7.8 `Event::ScrollTo { view_id: ViewId, line: u64, col: u64 }`
+### 7.8 `Event::ReplaceStatus { view_id, chars, preserve_case }`
+
+- Fires on `replace_status`.
+- `chars` is the current replacement string; `preserve_case` mirrors the `preserve_case` config flag.
+
+### 7.9 `Event::ScrollTo { view_id: ViewId, line: u64, col: u64 }`
 
 - Fires on `scroll_to`.
 - Request to scroll the viewport so that `(line, col)` is visible.
 - `line` is a **logical** line (not formatted). `col` is a UTF-8 byte offset within the line.
 
-### 7.9 `Event::Alert(String)`
+### 7.10 `Event::Alert(String)`
 
 - Fires on `alert`.
 - Used by `xi-core` for user-visible errors: file changes on disk, save failures, plugin crashes, invalid config, etc.
 - The SDK does not interpret the string; display it verbatim.
 
-### 7.10 `Event::Exited`
+### 7.11 `Event::AvailableLanguages` / `Event::AvailableThemes`
+
+```rust
+AvailableLanguages { languages: Vec<String> }
+AvailableThemes { themes: Vec<String> }
+```
+
+- Fire after `client_started` (once, during `spawn`).
+- `AvailableThemes` may fire again when the theme set changes; `AvailableLanguages` when the plugin set changes.
+
+### 7.12 `Event::AvailablePlugins { view_id, plugins }`
+
+```rust
+AvailablePlugins { view_id: ViewId, plugins: Vec<(String, bool)> }
+```
+
+- Fires once per view, right after `new_view`.
+- Each tuple is `(plugin_name, is_running)`.
+- Empty vec if no plugins are installed.
+
+### 7.13 `Event::PluginStarted` / `Event::PluginStopped`
+
+```rust
+PluginStarted { view_id: ViewId, plugin: String }
+PluginStopped { view_id: ViewId, plugin: String, code: i32 }
+```
+
+- Fire when the corresponding plugin lifecycle transition happens.
+- `code == 0` for a normal plugin stop; `code == 1` for a crash.
+
+### 7.14 `Event::PluginCommands { view_id, plugin, cmds }`
+
+```rust
+PluginCommands { view_id: ViewId, plugin: String, cmds: Vec<serde_json::Value> }
+```
+
+- Fires on `update_cmds`. The plugin has registered or updated its command palette entries.
+- `cmds` is a raw JSON array; the schema is defined by the plugin.
+
+### 7.15 `Event::HoverShown { view_id, request_id, result }`
+
+```rust
+HoverShown { view_id: ViewId, request_id: u64, result: Option<Hover> }
+```
+
+- Fires on `show_hover`, in response to `request_hover`.
+- `request_id` echoes the value passed to `request_hover`.
+- `result` is `None` if the position has no hover info, or if no LSP plugin is running.
+
+### 7.16 Status items
+
+```rust
+StatusItemAdded { view_id, source, key, value, alignment }
+StatusItemUpdated { view_id, key, value }
+StatusItemRemoved { view_id, key }
+```
+
+- Fire on the corresponding `add_status_item` / `update_status_item` / `remove_status_item` notifications.
+- `source` is the plugin that owns the item; `alignment` is `"left"` or `"right"`.
+
+### 7.17 `Event::Exited`
 
 - Fires **once** when the reader thread sees EOF on `xi-core`'s stdout.
 - Also fires for normal `shutdown()`.
 - After this event, all `XiClient` write methods return `Error::CoreNotRunning`.
 
-### 7.11 🚧 Planned events
+### 7.18 `Event::ViewClosed { view_id }`
 
-The following are designed but not yet implemented. They follow the same conventions.
-
-| Event                                                        | Trigger                          | Payload                                      |
-| ------------------------------------------------------------ | -------------------------------- | -------------------------------------------- |
-| `ViewClosed { view_id }`                                     | SDK-local after `close_view`     | —                                            |
-| `AvailableLanguages { languages }`                           | `available_languages`            | `Vec<String>`                                |
-| `AvailableThemes { themes }`                                 | `available_themes`               | `Vec<String>`                                |
-| `ReplaceStatus { view_id, chars, preserve_case }`            | `replace_status`                 | —                                            |
-| `HoverShown { view_id, request_id, result }`                 | `show_hover`                     | `Result<String, String>` (markdown or error) |
-| `ConfigResponse { request_id, view_id, config }`             | response to `get_config`         | —                                            |
-| `CutResult { request_id, text }`                             | response to `cut`                | `Option<String>`                             |
-| `CopyResult { request_id, text }`                            | response to `copy`               | `Option<String>`                             |
-| `DocumentContents { request_id, view_id, text }`             | response to `debug_get_contents` | —                                            |
-| `AvailablePlugins { view_id, plugins }`                      | `available_plugins`              | `Vec<(String, bool)>` (name, running)        |
-| `PluginStarted { view_id, plugin }`                          | `plugin_started`                 | —                                            |
-| `PluginStopped { view_id, plugin, code }`                    | `plugin_stopped`                 | `i32` (0 = user, 1 = crash)                  |
-| `PluginCommands { view_id, plugin, cmds }`                   | `update_cmds`                    | `Vec<Value>` (schema "in flux")              |
-| `StatusItemAdded { view_id, source, key, value, alignment }` | `add_status_item`                | —                                            |
-| `StatusItemUpdated { view_id, key, value }`                  | `update_status_item`             | —                                            |
-| `StatusItemRemoved { view_id, key }`                         | `remove_status_item`             | —                                            |
+- Fires locally, after a successful `close_view`.
+- `xi-core` does not send a notification for view closure; the SDK emits this itself.
 
 ---
 
@@ -901,8 +990,8 @@ Two types, different audiences:
 ```rust
 pub struct DocumentSnapshot {
     pub view_id: Option<ViewId>,
-    pub lines: Vec<LineState>,                 // one per logical line
-    pub selections: Vec<(usize, usize, usize, usize)>, // [start_line, start_col, end_line, end_col]
+    pub lines: Vec<LineState>,
+    pub selections: Vec<(usize, usize, usize, usize)>,
     pub pristine: bool,
     pub path: Option<PathBuf>,
     pub language: String,
@@ -910,13 +999,13 @@ pub struct DocumentSnapshot {
 }
 
 pub struct LineState {
-    pub text: String,           // line content, no trailing newline
-    pub styles: Vec<StyleSpan>, // absolute offsets (§8.4)
-    pub cursors: Vec<usize>,    // UTF-8 byte offsets within the line
+    pub text: String,
+    pub styles: Vec<StyleSpan>,
+    pub cursors: Vec<usize>,
 }
 
 pub struct StyleSpan {
-    pub start: usize,           // absolute UTF-8 byte offset in `text`
+    pub start: usize,
     pub len: usize,
     pub style_id: u64,
 }
@@ -925,13 +1014,13 @@ pub struct StyleSpan {
 Invariants:
 
 - `lines.len()` = the number of logical lines in the view. The empty document has exactly one empty line (`text == ""`).
-- `text` has no `\n` and no `\r`.
+- `text` has no `\n` and no `\r`. Exactly one trailing `\n` (and an optional preceding `\r`) is stripped from the wire payload.
 - `styles` are sorted by `start` and don't overlap unless `xi-core` sent overlapping spans (see §8.4).
 - `cursors` are sorted ascending and are valid UTF-8 boundaries.
 
 ### 8.3 Lines, operations, and `apply_ops`
 
-`xi-core` sends `update` as a list of ops. The SDK's `apply_ops` in `src/document.rs` is the reference implementation and is the same logic used on the wire in `xi-core`'s own frontend documentation.
+`xi-core` sends `update` as a list of ops. The SDK's `apply_ops` in `src/document.rs` is the reference implementation.
 
 The wire shape:
 
@@ -955,8 +1044,8 @@ Each op:
 interface Op {
   op: 'copy' | 'skip' | 'invalidate' | 'ins' | 'update'
   n: number
-  lines?: Line[] // for ins / update
-  ln?: number // logical line number (see below)
+  lines?: Line[]
+  ln?: number
 }
 ```
 
@@ -972,14 +1061,15 @@ Application semantics (`apply_ops`):
 
 Invariants:
 
-- `n > 0` for every op.
-- For `ins` and `update`, `n == op.lines.len()`.
+- `n > 0` for every op (checked by `Operation::validate`).
+- For `ins` and `update`, `n == op.lines.len()` (checked by `Operation::validate`).
+- For other op types, `op.lines` is empty (checked by `Operation::validate`).
 - After processing all ops, `new_lines` length equals `xi-core`'s view line count.
 - Every old line is copied at most once (in the current batch).
 
 > **Gotcha:** `ins` does **not** advance `old_ix` because it introduces content that wasn't in the old state. A common bug is to advance `old_ix` on `ins`; the result is shifted lines.
 
-> **Gotcha:** `update` with `text: null` means "keep the old text"; `update` with `text: "<...>"` means "replace the text in place" (the SDK doesn't currently emit such updates because `xi-core` doesn't either; but the code handles it).
+> **Gotcha:** `update` with `text: null` means "keep the old text"; `update` with `text: "<...>"` means "replace the text in place".
 
 > **Gotcha:** `apply_ops` must be atomic — apply the whole batch, then publish. `DocumentState::apply` does exactly that (builds `new_lines` locally, then assigns). If you ever change it, keep it atomic; otherwise a UI reading `document()` mid-batch sees a torn state.
 
@@ -997,28 +1087,20 @@ Meaning:
 - Triplet 1: `delta = -2`, `len = 4`, `style_id = 5`. Absolute `start = 5 + (-2) = 3`, `end = 7`.
 - Triplet 2: `delta = 0`, `len = 3`, `style_id = 8`. Absolute `start = 7 + 0 = 7`, `end = 10`.
 
-So the **decoder** is:
+The SDK stores the raw triplet as `StyleDef { delta, length, style_id }` (§8.4) and decodes absolute offsets in `DocumentState::snapshot`:
 
 ```rust
 let mut cursor = 0i64;
 let mut spans = Vec::new();
-for chunk in styles.chunks(3) {
-    let delta = chunk[0];
-    let len   = chunk[1] as u64;
-    let sid   = chunk[2] as u64;
-    let start = cursor + delta;
-    let end   = start + len as i64;
-    spans.push(StyleSpan { start: start as usize, len: len as usize, style_id: sid });
+for s in &line.styles {
+    let start = cursor + s.delta;
+    let end = start + s.length as i64;
+    spans.push(StyleSpan { start: start.max(0) as usize, len: s.length as usize, style_id: s.style_id });
     cursor = end;
 }
 ```
 
-> **Gotcha (current bug):** `document.rs::snapshot()` currently treats `StyleDef.offset` as absolute: `start: s.offset.max(0) as usize`. It is **not** absolute — it's the delta from the previous span's end. Two fixes are equivalent:
->
-> 1. Accumulate deltas inside `deserialize_styles` so `StyleDef.offset` becomes absolute. Simplest, keeps `snapshot()` unchanged.
-> 2. Rename `StyleDef.offset` → `StyleDef.delta` and accumulate in `snapshot()`.
->
-> The example `styles: [0, 5, 3, -2, 4, 5, 0, 3, 8]` above decodes to `(0,5,3), (3,7,5), (7,10,8)`; the current code would render `(0,5,3), (0,4,5), (0,3,8)`, which is wrong.
+The example above decodes to `(0,5,3), (3,7,5), (7,10,8)`.
 
 ### 8.5 Cursors and selections
 
@@ -1031,7 +1113,7 @@ A _caret_ is a selection with `start == end`; it will also appear in the corresp
 
 > **Gotcha:** the SDK does not deduplicate. A caret may be represented both as a one-element `cursors` entry and as a zero-width `selections` entry. Your UI can use either; both are correct.
 
-Column units: UTF-8 byte offsets within the line, matching `Line.text` (which is the line content with no trailing `\n`).
+Column units: UTF-8 byte offsets within the line, matching `Line.text`.
 
 ### 8.6 Annotations
 
@@ -1040,32 +1122,35 @@ The full annotation shape on the wire:
 ```ts
 interface AnnotationSlice {
   type: "selection" | "find" | string;
-  ranges: [[number, number, number, number], ...]; // [start_line, start_col, end_line, end_col]
+  ranges: [[number, number, number, number], ...];
   payloads: [any] | null;
   n: number;
 }
 ```
 
-The SDK currently extracts only `type == "selection"`. `find` annotations are ignored (matches count is surfaced via `Event::FindStatus` instead). Additional annotation types (plugin-provided) are preserved in the wire payload but not exposed on `DocumentSnapshot` (🚧 planned: `DocumentSnapshot.annotations: Vec<AnnotationSlice>`).
+The SDK currently extracts only `type == "selection"`. `find` annotations are ignored (match count is surfaced via `Event::FindStatus` instead). Additional annotation types (plugin-provided) are preserved in the wire payload but not exposed on `DocumentSnapshot`.
+
+> **Not yet:** `DocumentSnapshot.annotations: Vec<AnnotationSlice>` (Phase 7). Needed for LSP diagnostics (`type: "diagnostic"` in newer builds).
 
 ### 8.7 `Config`
 
-`Config` is the merged view config. All fields are `Option<T>` because `xi-core` omits keys the user didn't set (in diff events) and because different languages may not have all keys. The SDK merges diffs into `DocumentState::config` before emitting `ConfigChanged`, so `document(view_id).config` reflects a complete, cumulative view of the config as far as `xi-core` has told us.
+`Config` is the merged view config. All fields are `Option<T>` because `xi-core` omits keys the user didn't set (in diff events) and different languages may not have all keys. The SDK merges diffs into `DocumentState::config` before emitting `ConfigChanged`, so `document(view_id).config` reflects a complete, cumulative view of the config as far as `xi-core` has told us.
 
-The first `config_changed` after `new_view` is the **full** merged config. Subsequent ones are diffs. The SDK's merge:
+The first `config_changed` after `new_view` is the **full** merged config. Subsequent ones are diffs. `Config::merge` semantics:
 
-```rust
-for (k, v) in changes { cfg.set(k, v); } // null → remove
-```
+- `null` → clear the key (revert to default);
+- other value → set the key, if it deserializes to the field type;
+- absent key → leave the current value untouched;
+- unknown key → ignored (xi-core may ship config keys we don't model).
 
 ### 8.8 `Style` definitions
 
 ```rust
 pub struct Style {
     pub id: u64,
-    pub fg_color: Option<u32>,  // ARGB
-    pub bg_color: Option<u32>,  // ARGB
-    pub weight: Option<u32>,    // 100..900
+    pub fg_color: Option<u32>,
+    pub bg_color: Option<u32>,
+    pub weight: Option<u32>,
     pub italic: Option<bool>,
     pub underline: Option<bool>,
 }
@@ -1074,6 +1159,41 @@ pub struct Style {
 The SDK stores each `def_style` in `Inner::styles` and emits `StyleDefined(style)`. `Line.styles[].style_id` references these ids.
 
 Colors are **ARGB in word order** (i.e. `0xAARRGGBB`). Convert to whatever your renderer expects.
+
+### 8.9 `FindQuery`, `FindOptions`, `ModifySelection`
+
+See §6.2.6. Builder pattern:
+
+```rust
+FindQuery::new("hello")
+    .case_sensitive(true)
+    .regex(false)
+    .whole_words(true)
+    .with_id(7)
+
+FindOptions::default()
+    .wrap_around(true)
+    .modify_selection(ModifySelection::Add)
+```
+
+### 8.10 `GestureType`, `Granularity`
+
+See §6.2.5.
+
+### 8.11 `Position`, `Hover`
+
+```rust
+pub struct Position { pub line: u64, pub col: u64 }
+
+pub struct Hover {
+    pub content: String,             // markdown
+    pub range: Option<Vec<u64>>,     // [start_line, start_col, end_line, end_col]
+}
+```
+
+### 8.12 `SpawnOptions`, `ConfigDomain`
+
+See §4.1, §6.4.
 
 ---
 
@@ -1096,19 +1216,32 @@ Wire shape:
 {"id": 7, "result": [[5.0, 5.0], [3.0]]}
 ```
 
-The SDK's default policy is **`CodepointMono`**: each Unicode scalar counts as width 1.0. So `"hello"` → 5.0, `"world"` → 5.0, `"foo"` → 3.0. This is fast, allocation-free, and works everywhere; it just doesn't match a real font's metrics.
+**Default policy: `CodepointMono`.** Each Unicode scalar counts as width 1.0. So `"hello"` → 5.0, `"привет"` → 6.0, `"foo"` → 3.0. Fast, allocation-free, portable; doesn't match a real font's metrics.
 
-> **Auto:** the SDK replies to every `measure_width` from the reader thread while holding `Inner` only long enough to call `RpcWriter::respond`. You don't need to do anything. 🚧 A future `XiClient::set_width_measure` will let you install a callback (`Fn(&[String]) -> Vec<f64>`) for real pixel widths.
+**Custom policy:** install a callback with `set_width_measure(f)`:
 
-> **Gotcha:** if you install a callback later, it runs on the **reader thread**. It must not call back into `XiClient` (which would deadlock on `Inner`).
+```rust
+client.set_width_measure(|strings: &[String]| -> Vec<f64> {
+    // e.g. query your font system for real metrics
+    strings.iter().map(|s| s.chars().count() as f64 * 7.5).collect()
+});
+```
+
+The callback returns one `f64` per input string; the SDK pads short outputs with `0.0` and truncates long outputs to match `strings.len()`.
+
+`clear_width_measure()` restores the default `CodepointMono` policy.
+
+> **Gotcha:** the callback runs on the **reader thread**. It must not call back into `XiClient` (which would deadlock on `Inner`). Reading `document()` from the callback is technically safe (it only locks `Inner`) but doing heavy work there will stall inbound message processing.
+
+> **Gotcha:** if the callback returns fewer widths than strings, the missing ones default to `0.0`; if it returns more, extras are dropped. This is defensive; well-behaved callbacks return exactly `strings.len()` values.
 
 ### 9.2 `view_id` string ↔ numeric
 
 The wire uses `"view-id-<n>"`. The SDK's `ViewId` newtype round-trips this and hides it. You never serialize or parse the string form.
 
-### 9.3 `newline` framing
+### 9.3 Newline framing
 
-You never think about line framing. `RpcWriter` always appends `\n` and flushes. `RpcReader` always reads one line at a time and parses it.
+You never think about line framing. `xi-rpc`'s `RpcLoop` reads one JSON line at a time and parses it. The SDK's `SharedStdin` sends `\n`-terminated messages and flushes.
 
 ### 9.4 `update` ops application
 
@@ -1120,47 +1253,56 @@ You don't need to interpret `copy`/`skip`/`invalidate`/`ins`/`update`. The SDK a
 
 ### 9.6 Request correlation
 
-Every outbound request gets an `id` from `RpcWriter::next_id`. `Inner::pending` maps `id → PendingRequest`. `new_view_async` and the synchronous request methods (`get_config`, `cut`, `copy`, `debug_get_contents`) all register entries; the reader thread removes and dispatches them. You never touch `pending`.
+Every outbound request gets an `id` from `xi-rpc`'s internal counter. Blocking callers (`new_view`, `get_config`, `cut`, `copy`) block on a channel that `xi-rpc` wires up; the reader thread's `RpcLoop` dispatches the response back. You never see an `id`.
 
-### 9.7 `measure_width` again (worth repeating)
+### 9.7 The `new_view` race
 
-There is **one** core-initiated request type in the current build: `measure_width`. The SDK handles it. No other core-initiated requests are expected. If `xi-core` ever adds one, the SDK must be extended (the current reader would fail to dispatch it and would emit `Event::Alert` or drop it — not crash).
+Between `xi-core`'s response to `new_view` and the app thread's `docs.insert(view_id, ...)`, `xi-core` may already be pushing `update` notifications for the new view. `ClientHandler::on_update` buffers these in `Inner::pending_updates[view_id]`. The next `XiClient::new_view` drains and applies them before returning. Without this, the first screen of content would be silently dropped. See §4.1.
 
 ---
 
-## 10. Known gaps, bugs, and design notes
+## 10. Known gaps and design notes
 
-### Bugs in the current skeleton
+Everything below is deliberate, tracked, and assigned to a phase in
+[`docs/roadmap.md`](roadmap.md). Nothing here is a bug in the shipped surface.
 
-1. **`events()` returns an owned `Receiver`.** `crossbeam_channel::Receiver` is not `Clone`. Change the signature to `fn events(&self) -> &Receiver<Event>` (the `Receiver` lives on `XiClient`, not `Inner`).
-2. **`StyleSpan.start` is wrong.** `document.rs::snapshot` treats the delta-coded `StyleDef.offset` as absolute. See §8.4 for the correct decoder and the two equivalent fixes.
-3. **`client.rs::spawn` is `unimplemented!()`.** The intended implementation is §4.1.
-4. **`XiProcess::stdin` / `.stdout` are `pub` and accessed with `mem::replace(.., unimplemented!())`.** Replace with `take_stdin() -> Option<ChildStdin>` and `take_stdout() -> Option<ChildStdout>`, both called once in `spawn`.
-5. **`apply_ops` silently tolerates malformed inputs.** For `copy`, missing old lines push `Line::default()`; for `update`, `op.nb_lines != op.lines.len()` is not validated. The wire is generated by `xi-core` so this is fine in practice, but a defensive `debug_assert!` would help.
+### 10.1 API gaps (Phase 6)
 
-### Missing features (🚧 planned)
+- **Movement:** `move_word_left/right`, `move_to_left_end/right_end_of_line`, `move_to_beginning/end_of_document`, `move_to_beginning/end_of_paragraph`, `scroll_page_up/down` — plus all `_and_modify_selection` variants. ~20 methods, all one-liners.
+- **Multi-cursor:** `add_selection_above` / `below`, `selection_into_lines`.
+- **Editing:** `paste` (needs a dedicated lifecycle test for the multi-cursor semantics), `goto_line`, `delete_to_end_of_paragraph`, `delete_to_beginning_of_line`, `increase_number`, `decrease_number`.
 
-- **`Event::HoverShown`.** `request_hover` currently returns no event; the response arrives as `show_hover` and is silently dropped. Add a `HoverShown { view_id, request_id, result }` event and correlate by the caller-supplied `request_id` (not the RPC id).
-- **`Event::AvailableLanguages` / `AvailableThemes`.** Currently consumed silently.
-- **`Event::ConfigResponse` / `CutResult` / `CopyResult` / `DocumentContents`.** Results of synchronous requests currently come back only through the `Result` return value; the events are not emitted. Add them if you have event-driven consumers.
-- **`Event::PluginStarted` / `PluginStopped` / `PluginCommands` / `AvailablePlugins`.** Not exposed yet.
-- **`Event::StatusItemAdded` / `Updated` / `Removed`.** Not exposed yet.
-- **`Event::ReplaceStatus`.** Not exposed yet.
-- **`Event::ViewClosed`.** The SDK knows when it called `close_view`; emit it locally.
-- **`SpawnOptions`.** Not yet; `spawn` uses empty `client_started`.
-- **`wait_for_exit(Duration) -> Result<ExitStatus>`.** Not yet; process is reaped by `XiProcess::Drop`.
-- **`set_width_measure(callback)`.** Not yet; `measure_width` uses `CodepointMono` (§9.1).
-- **Full `find_status` payload.** Only `matches` count is exposed. The full query list (chars, case sensitivity, whole_words, per-match lines) is dropped.
-- **Full `theme_changed` payload.** Only `name` is exposed; the `ThemeSettings` object (foreground, background, caret, selection colors, …) is dropped.
+These are trivial to add; the SDK's `send_edit` helper covers them. They were deferred to keep PRs scoped.
 
-### Design tradeoffs we accepted
+### 10.2 Payload gaps (Phase 7)
 
-- **Pull model for documents.** `Event::DocumentUpdated` carries no snapshot; the UI calls `document()`. Pros: cheap to emit, UI coalesces. Cons: a small race window where `document()` returns a newer state than the triggering event. Alternative: include the snapshot in the event (more allocation, cleaner semantics). If you need the latter, add a separate `Event::DocumentSnapshot(DocumentSnapshot)` and keep `DocumentUpdated` as a lightweight signal.
-- **Unbounded event channel.** `crossbeam_channel::unbounded` means the reader thread never blocks on `send`. A slow consumer will grow the channel without bound. For UI-driven clients this is fine; for headless pipelines, consider a bounded channel with a drop policy. 🚧 planned `XiClient::set_event_buffer(usize)`.
-- **Single reader thread.** All inbound JSON parsing and state updates happen on one thread. This is the simplest correct model and matches `xi-core`'s single-threaded frontend handling.
-- **No auto-reconnect.** If `xi-core` exits, the SDK stays dead until you drop and `spawn` again. This matches `xi-core`'s "no version negotiation" stance.
+- **`Event::ConfigChanged { changes: Config }`** loses keys not modeled by `Config`. The state gets them via `Config::merge` (best-effort), but a subscriber on the event won't see `scroll_past_end: true`, etc. Fix: add `raw: serde_json::Value` alongside `changes`.
+- **`Event::FindStatus { matches: u64 }`** drops `queries[i].lines` and per-query metadata. Needed for minimap markers and "F6" navigation in Sublime-like UIs. Fix: add `queries: Vec<QueryStatus>` with `{ id, chars, case_sensitive, whole_words, lines: Vec<u64>, matches: u64 }`.
+- **`Event::ThemeChanged { name }`** drops `ThemeSettings` (foreground/background/caret/selection colors). Without colors, a frontend can't actually apply the theme from the event. Fix: add `theme: ThemeSettings` with `Option<u32>` color fields.
+- **`DocumentSnapshot.annotations`** doesn't exist. LSP diagnostics and other plugin annotations (`type: "diagnostic"`, `type: "hover"`) are preserved on the wire but not surfaced. Fix: add `annotations: Vec<AnnotationSlice>` with `type`, `ranges`, `payloads`, `n`.
 
-### Things we deliberately don't expose
+### 10.3 Async & performance (Phase 8)
+
+- **`new_view` is blocking.** Same for `cut` / `copy` / `get_config`. Inside a `winit` / `egui` loop, block a worker thread. Fix: `new_view_async` → `Result<u64>` request id; caller awaits `Event::ViewOpened { request_id, .. }`. The infrastructure (`Inner::next_request_id`) is already in place.
+- **`copy_async` / `cut_async`.** Same idea, via `xi-rpc`'s `send_rpc_request_async` + callback. Not yet planned as a method; use the sync versions with a worker thread for now.
+- **Unbounded event channel.** A slow consumer will grow the channel without bound. Fix: `XiClient::set_event_buffer(size)` for a bounded channel with a drop-oldest policy.
+- **`document()` clones every line** on every call. For 10k-line files this is ~10k `String` allocations per render frame. Fine at 60 fps with small files, measurable with large ones. Fix candidate: `Arc<str>` in `LineState` or a dirty-region snapshot API. Benchmark first; don't optimize blind.
+- **`Inner` is a single `Mutex`.** All view reads block behind any writer. `DashMap<ViewId, _>` is a possible future optimization. Not a priority until there's a benchmark showing contention.
+
+### 10.4 IDE gaps (Phase 9)
+
+- **`request_completion`** doesn't exist (and may not be present in every `xi-core` build). Needs an LSP plugin and its own event (`Event::CompletionShown`).
+- **Diagnostics.** LSP diagnostics arrive as annotations (`type: "diagnostic"`). Surfaced via `DocumentSnapshot.annotations` (Phase 7) — but the API to subscribe per-view and filter by severity is not designed yet.
+- **`Event::Alert`** is a single `String`. Doesn't distinguish `Info` / `Warning` / `Error`. `xi-core` doesn't tag it; frontends have to parse. Low priority.
+
+### 10.5 Design tradeoffs we accepted
+
+- **Pull model for documents.** `Event::DocumentUpdated` carries no snapshot; the UI calls `document()`. Pros: cheap to emit, UI coalesces. Cons: a small race window where `document()` returns a newer state than the triggering event. Fix candidate: a separate `Event::DocumentSnapshot(DocumentSnapshot)` variant that carries the snapshot, keeping `DocumentUpdated` as a lightweight signal. Not needed until a frontend actually exhibits the problem.
+- **No auto-reconnect.** If `xi-core` exits, the SDK stays dead until you drop and `spawn` again. Matches `xi-core`'s "no version negotiation" stance.
+- **Single reader thread.** All inbound JSON parsing and state updates happen on one thread. Matches `xi-core`'s single-threaded frontend handling.
+- **`XiClient: Send + !Sync`.** Inherited from `xi-rpc`'s `Box<dyn Peer>`. Use `Arc<Mutex<XiClient>>` if you need shared access across threads.
+
+### 10.6 Things we deliberately don't expose
 
 - Raw `Value` escape hatch (send arbitrary `method`/`params`). If you need a method not in §6, add it there — don't open a back door.
 - `debug_rewrap` / `debug_wrap_width` — deprecated by `xi-core`.
@@ -1176,55 +1318,55 @@ Compact catalog of every raw method the SDK is allowed to speak. See `core-lib/s
 
 ### Client → core, notifications (no response)
 
-| Method               | Params (shape)                      | SDK method(s)                  |
-| -------------------- | ----------------------------------- | ------------------------------ |
-| `client_started`     | `{config_dir?, client_extras_dir?}` | `spawn` / `spawn_with_options` |
-| `close_view`         | `{view_id}`                         | `close_view`                   |
-| `save`               | `{view_id, file_path}`              | `save`                         |
-| `set_theme`          | `{theme_name}`                      | `set_theme`                    |
-| `set_language`       | `{view_id, language_id}`            | `set_language`                 |
-| `modify_user_config` | `{domain, changes}`                 | `modify_user_config`           |
-| `edit.<inner>`       | see §6.2                            | all editing/movement/find/etc. |
-| `plugin.start`       | `{view_id, plugin_name}`            | `plugin_start`                 |
-| `plugin.stop`        | `{view_id, plugin_name}`            | `plugin_stop`                  |
-| `plugin.plugin_rpc`  | `{view_id, receiver, rpc}`          | `plugin_rpc`                   |
+| Method                               | Params (shape)                      | SDK method(s)                  |
+| ------------------------------------ | ----------------------------------- | ------------------------------ |
+| `client_started`                     | `{config_dir?, client_extras_dir?}` | `spawn` / `spawn_with_options` |
+| `close_view`                         | `{view_id}`                         | `close_view`                   |
+| `save`                               | `{view_id, file_path}`              | `save`                         |
+| `set_theme`                          | `{theme_name}`                      | `set_theme`                    |
+| `set_language`                       | `{view_id, language_id}`            | `set_language`                 |
+| `modify_user_config`                 | `{domain, changes}`                 | `modify_user_config`           |
+| `edit.<inner>`                       | see §6.2                            | all editing/movement/find/etc. |
+| `plugin` + `{command: "start"}`      | `{view_id, plugin_name}`            | `plugin_start`                 |
+| `plugin` + `{command: "stop"}`       | `{view_id, plugin_name}`            | `plugin_stop`                  |
+| `plugin` + `{command: "plugin_rpc"}` | `{view_id, receiver, rpc}`          | `plugin_rpc`                   |
 
 ### Client → core, requests (with response)
 
-| Method               | Params         | Response             |
-| -------------------- | -------------- | -------------------- |
-| `new_view`           | `{file_path?}` | `"view-id-<n>"`      |
-| `get_config`         | `{view_id}`    | merged config object |
-| `edit.cut`           | `{view_id}`    | `String \| null`     |
-| `edit.copy`          | `{view_id}`    | `String \| null`     |
-| `debug_get_contents` | `{view_id}`    | `String`             |
+| Method               | Params         | Response                   |
+| -------------------- | -------------- | -------------------------- |
+| `new_view`           | `{file_path?}` | `"view-id-<n>"`            |
+| `get_config`         | `{view_id}`    | merged config object       |
+| `edit.cut`           | `{view_id}`    | `String \| null`           |
+| `edit.copy`          | `{view_id}`    | `String \| null`           |
+| `debug_get_contents` | `{view_id}`    | `String` (not exposed yet) |
 
 ### Core → client, notifications
 
-| Method                | Params                                                     | Event                   |
-| --------------------- | ---------------------------------------------------------- | ----------------------- |
-| `update`              | `{view_id, update: {ops, pristine, annotations}}`          | `DocumentUpdated`       |
-| `scroll_to`           | `{view_id, line, col}`                                     | `ScrollTo`              |
-| `def_style`           | `{id, fg_color?, bg_color?, weight?, italic?, underline?}` | `StyleDefined`          |
-| `theme_changed`       | `{name, theme}`                                            | `ThemeChanged`          |
-| `config_changed`      | `{view_id, changes}`                                       | `ConfigChanged`         |
-| `language_changed`    | `{view_id, language_id}`                                   | `LanguageChanged`       |
-| `available_languages` | `{languages}`                                              | `AvailableLanguages` 🚧 |
-| `available_themes`    | `{themes}`                                                 | `AvailableThemes` 🚧    |
-| `find_status`         | `{view_id, queries}`                                       | `FindStatus`            |
-| `replace_status`      | `{view_id, status}`                                        | `ReplaceStatus` 🚧      |
-| `show_hover`          | `{view_id, request_id, result}`                            | `HoverShown` 🚧         |
-| `alert`               | `{msg}`                                                    | `Alert`                 |
-| `available_plugins`   | `{view_id, plugins}`                                       | `AvailablePlugins` 🚧   |
-| `plugin_started`      | `{view_id, plugin}`                                        | `PluginStarted` 🚧      |
-| `plugin_stopped`      | `{view_id, plugin, code}`                                  | `PluginStopped` 🚧      |
-| `update_cmds`         | `{view_id, plugin, cmds}`                                  | `PluginCommands` 🚧     |
-| `add_status_item`     | `{view_id, source, key, value, alignment}`                 | `StatusItemAdded` 🚧    |
-| `update_status_item`  | `{view_id, key, value}`                                    | `StatusItemUpdated` 🚧  |
-| `remove_status_item`  | `{view_id, key}`                                           | `StatusItemRemoved` 🚧  |
+| Method                | Params                                                     | Event                      |
+| --------------------- | ---------------------------------------------------------- | -------------------------- |
+| `update`              | `{view_id, update: {ops, pristine, annotations}}`          | `DocumentUpdated`          |
+| `scroll_to`           | `{view_id, line, col}`                                     | `ScrollTo`                 |
+| `def_style`           | `{id, fg_color?, bg_color?, weight?, italic?, underline?}` | `StyleDefined`             |
+| `theme_changed`       | `{name, theme}`                                            | `ThemeChanged` (name only) |
+| `config_changed`      | `{view_id, changes}`                                       | `ConfigChanged`            |
+| `language_changed`    | `{view_id, language_id}`                                   | `LanguageChanged`          |
+| `available_languages` | `{languages}`                                              | `AvailableLanguages`       |
+| `available_themes`    | `{themes}`                                                 | `AvailableThemes`          |
+| `find_status`         | `{view_id, queries: [{id, matches, ...}]}`                 | `FindStatus` (summed)      |
+| `replace_status`      | `{view_id, status: {chars, preserve_case}}`                | `ReplaceStatus`            |
+| `show_hover`          | `{view_id, request_id, result}`                            | `HoverShown`               |
+| `alert`               | `{msg}`                                                    | `Alert`                    |
+| `available_plugins`   | `{view_id, plugins}`                                       | `AvailablePlugins`         |
+| `plugin_started`      | `{view_id, plugin}`                                        | `PluginStarted`            |
+| `plugin_stopped`      | `{view_id, plugin, code}`                                  | `PluginStopped`            |
+| `update_cmds`         | `{view_id, plugin, cmds}`                                  | `PluginCommands`           |
+| `add_status_item`     | `{view_id, source, key, value, alignment}`                 | `StatusItemAdded`          |
+| `update_status_item`  | `{view_id, key, value}`                                    | `StatusItemUpdated`        |
+| `remove_status_item`  | `{view_id, key}`                                           | `StatusItemRemoved`        |
 
 ### Core → client, requests (client must respond)
 
-| Method          | Params                 | Expected response     | SDK policy                |
-| --------------- | ---------------------- | --------------------- | ------------------------- |
-| `measure_width` | `[{id, strings}, ...]` | `[[width, ...], ...]` | `CodepointMono`, see §9.1 |
+| Method          | Params                 | Expected response     | SDK policy                                                        |
+| --------------- | ---------------------- | --------------------- | ----------------------------------------------------------------- |
+| `measure_width` | `[{id, strings}, ...]` | `[[width, ...], ...]` | `CodepointMono` by default; custom via `set_width_measure` (§9.1) |

@@ -3,7 +3,7 @@ name = "xi-client"
 version = "0.1.0"
 edition = "2024"
 description = "SDK for talking to xi-core. No GUI deps."
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
