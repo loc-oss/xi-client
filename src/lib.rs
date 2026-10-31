@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn io_error_converts() {
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io = std::io::Error::other("boom");
         let err: Error = io.into();
         assert!(matches!(err, Error::Io(_)));
         assert!(err.to_string().starts_with("io: "));
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn io_error_has_source() {
         use std::error::Error as _;
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io = std::io::Error::other("boom");
         let err: Error = io.into();
         assert!(err.source().is_some());
     }

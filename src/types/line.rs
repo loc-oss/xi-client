@@ -48,8 +48,7 @@ pub fn deserialize_styles<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<StyleDe
         ));
     }
     let mut out = Vec::with_capacity(v.len() / 3);
-    for chunk in v.chunks_exact(3) {
-        let (delta, length, style_id) = (chunk[0], chunk[1], chunk[2]);
+    for &[delta, length, style_id] in v.as_chunks::<3>().0 {
         if length < 0 || style_id < 0 {
             return Err(serde::de::Error::custom(
                 "style length and id must be non-negative",

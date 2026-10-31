@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn serializes_syntax() {
         assert_eq!(
-            serde_json::to_value(&ConfigDomain::Syntax("rust".into())).unwrap(),
+            serde_json::to_value(ConfigDomain::Syntax("rust".into())).unwrap(),
             json!({"syntax": "rust"})
         );
     }
@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn serializes_user_override() {
         assert_eq!(
-            serde_json::to_value(&ConfigDomain::UserOverride(ViewId(1))).unwrap(),
+            serde_json::to_value(ConfigDomain::UserOverride(ViewId(1))).unwrap(),
             json!({"user_override": "view-id-1"})
         );
     }

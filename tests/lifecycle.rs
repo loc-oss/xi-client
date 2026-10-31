@@ -68,10 +68,10 @@ fn wait_until_doc<F: Fn(&DocumentSnapshot) -> bool>(
     let rx = client.events();
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(doc) = client.document(view_id) {
-            if pred(&doc) {
-                return true;
-            }
+        if let Some(doc) = client.document(view_id)
+            && pred(&doc)
+        {
+            return true;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
