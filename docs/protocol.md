@@ -314,7 +314,10 @@ With `SpawnOptions::config_dir` and/or `client_extras_dir`:
 ```json
 {
   "method": "client_started",
-  "params": { "config_dir": "/path/to/config", "client_extras_dir": "/path/to/extras" }
+  "params": {
+    "config_dir": "/path/to/config",
+    "client_extras_dir": "/path/to/extras"
+  }
 }
 ```
 
@@ -1042,10 +1045,10 @@ Each op:
 
 ```ts
 interface Op {
-  op: 'copy' | 'skip' | 'invalidate' | 'ins' | 'update'
-  n: number
-  lines?: Line[]
-  ln?: number
+  op: "copy" | "skip" | "invalidate" | "ins" | "update";
+  n: number;
+  lines?: Line[];
+  ln?: number;
 }
 ```
 

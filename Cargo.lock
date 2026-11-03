@@ -106,9 +106,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "memchr"
@@ -490,8 +490,8 @@ dependencies = [
 
 [[package]]
 name = "xi-rpc"
-version = "0.3.0"
-source = "git+https://github.com/loc-oss/xi-rpc?branch=main#e432d9ebcb73863089262c92245e3457fc94f82c"
+version = "0.4.0"
+source = "git+https://github.com/loc-oss/xi-rpc?tag=v0.4.0#5994ce23b6bbcfd7ce99211a27731af484cfb56a"
 dependencies = [
  "crossbeam-utils",
  "log",
@@ -503,8 +503,8 @@ dependencies = [
 
 [[package]]
 name = "xi-trace"
-version = "0.2.0"
-source = "git+https://github.com/loc-oss/xi-trace?branch=main#fb7462ad659c266cc433ce715c7a36a2e735913d"
+version = "0.3.1"
+source = "git+https://github.com/loc-oss/xi-trace?tag=v0.3.1#016672c615ad0e49d5633fed04790657390f154d"
 dependencies = [
  "lazy_static",
  "libc",
